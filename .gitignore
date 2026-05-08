@@ -1,0 +1,10 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+/bin/
+include/
+lib/
+knowledge_base/
+last_analyzed.txt
+master_insights.json
+pyvenv.cfg
+.env
+/downloads
