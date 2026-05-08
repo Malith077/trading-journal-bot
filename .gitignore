@@ -8,3 +8,4 @@ master_insights.json
 pyvenv.cfg
 .env
 /downloads
+/venv/
