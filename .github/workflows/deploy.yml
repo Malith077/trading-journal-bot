@@ -1,0 +1,30 @@
+name: Deploy Trading Bot
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    # This tells GitHub to use your Raspberry Pi 5 runner
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Sync Files and Restart Service
+        run: |
+          # Navigate to your bot directory
+          cd /home/malith/bot
+          
+          # Ensure the latest code is pulled
+          git pull origin main
+          
+          # Sync dependencies within the virtual environment
+          ./venv/bin/pip install -r requirements.txt
+          
+          # Restart the systemd service to apply changes
+          # Note: The runner user must have NOPASSWD sudo access for systemctl
+          sudo systemctl restart tradingbot
