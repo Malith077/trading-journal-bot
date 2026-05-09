@@ -2,7 +2,7 @@ import os
 import discord
 import datetime
 from discord.ext import commands
-from config import BOT_TOKEN
+from config import BOT_TOKEN, HEALTH_CHANNEL_ID, HEALTH_CHANNEL_NAME
 
 class TradingAssistant(commands.Bot):
     def __init__(self):
@@ -26,29 +26,41 @@ bot = TradingAssistant()
 
 @bot.event
 async def on_ready():
-    # Added datetime import above to prevent the next NameError
-    print(f'Logged in as {bot.user} | Tarneit Local Time: {datetime.datetime.now()}')
-    print('--------------------------')
-
-# In bot.py
-@bot.event
-async def on_ready():
-    # Log to terminal for debugging in Tarneit
     print(f'🚀 Logged in as {bot.user} | {datetime.datetime.now()}')
     
-    # 1. Get the notification channel from your config
-    from config import REMINDER_CHANNEL_ID
-    channel = bot.get_channel(REMINDER_CHANNEL_ID)
+    target_channel = None
+
+    # 1. Try to find the channel by ID first
+    if HEALTH_CHANNEL_ID:
+        target_channel = bot.get_channel(HEALTH_CHANNEL_ID)
     
-    # 2. Send the "I'm Alive" heartbeat
-    if channel:
+    # 2. If ID is missing or invalid, search all visible channels by name
+    if not target_channel:
+        target_channel = discord.utils.get(bot.get_all_channels(), name=HEALTH_CHANNEL_NAME)
+
+    # 3. Send the Heartbeat
+    if target_channel:
+        embed = discord.Embed(
+            title="🔋 System Health Check",
+            description="**New version deployed successfully.**\nAll modules loaded. I'm alive!",
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now()
+        )
+        # Add a little technical flair
+        embed.add_field(name="Environment", value="Raspberry Pi 5", inline=True)
+        embed.add_field(name="Status", value="Online", inline=True)
+        
         try:
-            await channel.send("✨ **New version of me is deployed. I'm alive!**")
-            print("✅ Deployment heartbeat sent to Discord.")
+            await target_channel.send(embed=embed)
+            print(f"✅ Deployment heartbeat sent to #{target_channel.name}")
         except Exception as e:
-            print(f"⚠️ Failed to send heartbeat: {e}")
-            
+            print(f"⚠️ Could not send to health channel: {e}")
+    else:
+        print(f"❌ Could not find a channel named '{HEALTH_CHANNEL_NAME}'")
+
     print('--------------------------')
+
+
 if __name__ == "__main__":
     if not BOT_TOKEN:
         print("❌ ERROR: BOT_KEY is missing! Check your .env file.")

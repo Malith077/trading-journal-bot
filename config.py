@@ -8,7 +8,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_KEY')
 REMINDER_CHANNEL_ID = 1501833920449351720
 REMINDER_TIME = datetime.time(hour=8, minute=0)
-
+HEALTH_CHANNEL_NAME = "bothealth"
+HEALTH_CHANNEL_ID = 1502556311869591723
 # --- Ollama Config ---
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "gemma4:31b-cloud"
