@@ -1,0 +1,14 @@
+[Unit]
+Description=Discord Trading Bot
+After=network-target
+
+[Service]
+User=malith
+Group=malith
+WorkingDirectory=/home/malith/bot
+ExecStart=/home/malith/bot/venv/bin/python /home/malith/bot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
