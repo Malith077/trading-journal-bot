@@ -20,6 +20,7 @@ jobs:
             --exclude '.env' \
             --exclude 'venv/' \
             --exclude 'downloads/' \
+            --exclude 'chroma_db/' \
             --exclude '.git/' \
             ./ /home/malith/bot/
 
@@ -37,7 +38,9 @@ jobs:
       - name: 4. Update Dependencies & Restart
         run: |
           cd /home/malith/bot
-          
+
+          ollama pull nomic-embed-text
+          ./venv/bin/python scripts/reindex_all.py
           # Create venv only if it was wiped (e.g., after a reflash)
           if [ ! -d "venv" ]; then
               python3 -m venv venv
@@ -49,7 +52,7 @@ jobs:
           
           # Restart the bot (stops the old version, starts the new version)
           sudo systemctl restart tradingbot
-          
+
       - name: 5. Verify Deployment Health
         run: |
           # Wait a few seconds for the bot to attempt to log in
