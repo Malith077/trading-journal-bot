@@ -17,6 +17,34 @@ class Trades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @commands.command(name="download_trades")
+    async def download_trades(self, ctx, limit: int = 100):
+        """
+        Extracts trade screenshots from the current Discord channel 
+        and saves them to the local downloads folder.
+        """
+        # Ensure the target directory exists on the Pi/Mac
+        TRADES_DIR.mkdir(parents=True, exist_ok=True)
+        
+        count = 0
+        status_msg = await ctx.send(f"📥 Scanning for trade screenshots in **#{ctx.channel.name}**...")
+
+        async for message in ctx.channel.history(limit=limit):
+            if message.attachments:
+                for attachment in message.attachments:
+                    # Filter for common image extensions
+                    if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+                        # Use message ID prefix to prevent filename collisions
+                        file_name = f"{message.id}_{attachment.filename}"
+                        file_path = TRADES_DIR / file_name
+                        
+                        # Only download if we don't already have it
+                        if not file_path.exists():
+                            await attachment.save(file_path)
+                            count += 1
+
+        await status_msg.edit(content=f"✅ Successfully extracted **{count}** new trade screenshots to `{TRADES_DIR}`.")
+
     @commands.command(name="sync_fractals")
     async def sync_fractals(self, ctx):
         """Scans the Fractal_Trades directory and reports new files."""
@@ -24,14 +52,14 @@ class Trades(commands.Cog):
             await ctx.send(f"❌ Directory not found: `{TRADES_DIR}`")
             return
 
-        files = list(TRADES_DIR.glob("*.png")) + list(TRADES_DIR.glob("*.jpg"))
+        files = list(TRADES_DIR.glob("*.png")) + list(TRADES_DIR.glob("*.jpg")) + list(TRADES_DIR.glob("*.webp"))
         
-        # Load last analyzed to see what's new
         last_analyzed = ""
         if TRACKER_PATH.exists():
             last_analyzed = TRACKER_PATH.read_text().strip()
 
-        new_files = [f for f in files if f.name > last_analyzed]
+        # Sort to find files lexicographically "newer" than the last tracked file
+        new_files = [f for f in sorted(files) if f.name > last_analyzed]
         
         embed = discord.Embed(
             title="📂 Fractal Sync Report",
@@ -50,8 +78,7 @@ class Trades(commands.Cog):
             await ctx.send("❌ No trades directory found.")
             return
 
-        # 1. Identify files to analyze
-        all_files = sorted([f for f in TRADES_DIR.glob("*") if f.suffix.lower() in ['.png', '.jpg', '.jpeg']])
+        all_files = sorted([f for f in TRADES_DIR.glob("*") if f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.webp']])
         
         last_file = ""
         if TRACKER_PATH.exists():
@@ -63,17 +90,18 @@ class Trades(commands.Cog):
             await ctx.send("✅ Everything is up to date. No new trades to analyze.")
             return
 
-        status_msg = await ctx.send(f"🧪 Analyzing {len(to_process)} new trades. This may take a minute...")
+        status_msg = await ctx.send(f"🧪 Analyzing {len(to_process)} new trades with **{OLLAMA_MODEL}**...")
 
-        # 2. Load existing insights
         master_insights = []
         if INSIGHTS_PATH.exists():
-            with open(INSIGHTS_PATH, "r") as f:
-                master_insights = json.load(f)
+            try:
+                with open(INSIGHTS_PATH, "r") as f:
+                    master_insights = json.load(f)
+            except json.JSONDecodeError:
+                master_insights = []
 
         async with aiohttp.ClientSession() as session:
             for file_path in to_process:
-                # Convert image to base64 for Ollama Vision
                 with open(file_path, "rb") as img_file:
                     img_b64 = base64.b64encode(img_file.read()).decode('utf-8')
 
@@ -98,19 +126,18 @@ class Trades(commands.Cog):
                         data = await resp.json()
                         analysis = data.get("response", "No analysis returned.")
                         
-                        # Add to master list
                         master_insights.append({
                             "filename": file_path.name,
                             "date": datetime.datetime.now().isoformat(),
                             "analysis": analysis
                         })
                         
-                        # Update tracker after each successful file
+                        # Update the tracker with the last successfully processed filename
                         TRACKER_PATH.write_text(file_path.name)
                     else:
                         await ctx.send(f"⚠️ Failed to analyze `{file_path.name}` (Status: {resp.status})")
 
-        # 3. Save results
+        # Save all results to the central JSON database
         with open(INSIGHTS_PATH, "w") as f:
             json.dump(master_insights, f, indent=4)
 
