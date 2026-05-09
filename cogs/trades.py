@@ -2,146 +2,126 @@ import discord
 import json
 import aiohttp
 import base64
-import datetime
 from pathlib import Path
 from discord.ext import commands
-from config import (
-    OLLAMA_API_URL, 
-    OLLAMA_MODEL, 
-    TRADES_DIR, 
-    INSIGHTS_PATH, 
-    TRACKER_PATH
-)
+from config import OLLAMA_API_URL, OLLAMA_MODEL, TRADES_DIR, INSIGHTS_PATH, TRACKER_PATH
 
 class Trades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="download_trades")
-    async def download_trades(self, ctx, limit: int = 100):
-        """
-        Extracts trade screenshots from the current Discord channel 
-        and saves them to the local downloads folder.
-        """
-        # Ensure the target directory exists on the Pi/Mac
-        TRADES_DIR.mkdir(parents=True, exist_ok=True)
-        
-        count = 0
-        status_msg = await ctx.send(f"📥 Scanning for trade screenshots in **#{ctx.channel.name}**...")
-
-        async for message in ctx.channel.history(limit=limit):
-            if message.attachments:
-                for attachment in message.attachments:
-                    # Filter for common image extensions
-                    if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
-                        # Use message ID prefix to prevent filename collisions
-                        file_name = f"{message.id}_{attachment.filename}"
-                        file_path = TRADES_DIR / file_name
-                        
-                        # Only download if we don't already have it
-                        if not file_path.exists():
-                            await attachment.save(file_path)
-                            count += 1
-
-        await status_msg.edit(content=f"✅ Successfully extracted **{count}** new trade screenshots to `{TRADES_DIR}`.")
-
     @commands.command(name="sync_fractals")
     async def sync_fractals(self, ctx):
-        """Scans the Fractal_Trades directory and reports new files."""
-        if not TRADES_DIR.exists():
-            await ctx.send(f"❌ Directory not found: `{TRADES_DIR}`")
+        """Syncs all channels in the 'Fractal_Trades' category to local storage."""
+        target_category_name = "Fractal_Trades"
+        category = discord.utils.get(ctx.guild.categories, name=target_category_name)
+        
+        if not category:
+            await ctx.send(f"❌ Couldn't find category `{target_category_name}`.")
             return
 
-        files = list(TRADES_DIR.glob("*.png")) + list(TRADES_DIR.glob("*.jpg")) + list(TRADES_DIR.glob("*.webp"))
+        await ctx.send(f"📥 Syncing all channels in **{target_category_name}**...")
         
-        last_analyzed = ""
-        if TRACKER_PATH.exists():
-            last_analyzed = TRACKER_PATH.read_text().strip()
+        count = 0
+        for channel in category.text_channels:
+            # We preserve your subfolder structure
+            channel_path = TRADES_DIR / channel.name
+            channel_path.mkdir(parents=True, exist_ok=True)
+            
+            async for message in channel.history(limit=None, oldest_first=True):
+                if message.attachments:
+                    for attachment in message.attachments:
+                        if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+                            unique_filename = f"{message.id}_{attachment.filename}"
+                            file_path = channel_path / unique_filename
+                            if not file_path.exists():
+                                await attachment.save(file_path)
+                                count += 1
 
-        # Sort to find files lexicographically "newer" than the last tracked file
-        new_files = [f for f in sorted(files) if f.name > last_analyzed]
-        
-        embed = discord.Embed(
-            title="📂 Fractal Sync Report",
-            description=f"Found **{len(files)}** total trade screenshots.",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="New Trades", value=f"{len(new_files)} pending analysis", inline=True)
-        embed.set_footer(text=f"Last synced: {datetime.datetime.now().strftime('%H:%M:%S')}")
-        
-        await ctx.send(embed=embed)
+        await ctx.send(f"✅ Sync complete! Downloaded **{count}** new screenshots.")
 
     @commands.command(name="analyze_trades")
     async def analyze_trades(self, ctx):
-        """Processes new trade screenshots through Ollama Vision."""
+        """Processes new trades and extracts 'good_habits' and 'mistakes' for the Morning Prep."""
         if not TRADES_DIR.exists():
-            await ctx.send("❌ No trades directory found.")
+            await ctx.send("❌ No trades directory found. Run `!sync_fractals` first.")
             return
 
-        all_files = sorted([f for f in TRADES_DIR.glob("*") if f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.webp']])
-        
-        last_file = ""
+        # 1. Get last processed ID
+        last_id = 0
         if TRACKER_PATH.exists():
-            last_file = TRACKER_PATH.read_text().strip()
+            content = TRACKER_PATH.read_text().strip()
+            if content.isdigit():
+                last_id = int(content)
 
-        to_process = [f for f in all_files if f.name > last_file]
+        # 2. Find new files across all subfolders
+        new_trades = []
+        # We look for files where the prefix (Message ID) is > last_id
+        for img_path in TRADES_DIR.rglob("*"):
+            if img_path.is_file() and "_" in img_path.name:
+                try:
+                    msg_id = int(img_path.name.split("_")[0])
+                    if msg_id > last_id:
+                        new_trades.append((msg_id, img_path))
+                except ValueError:
+                    continue
 
-        if not to_process:
-            await ctx.send("✅ Everything is up to date. No new trades to analyze.")
+        if not new_trades:
+            await ctx.send("✅ Master Insights is already up to date.")
             return
 
-        status_msg = await ctx.send(f"🧪 Analyzing {len(to_process)} new trades with **{OLLAMA_MODEL}**...")
+        # Sort chronologically by Message ID
+        new_trades.sort(key=lambda x: x[0])
 
-        master_insights = []
+        # 3. Load existing Master Insights
+        master_data = {"good_habits": [], "mistakes": []}
         if INSIGHTS_PATH.exists():
             try:
                 with open(INSIGHTS_PATH, "r") as f:
-                    master_insights = json.load(f)
-            except json.JSONDecodeError:
-                master_insights = []
+                    master_data = json.load(f)
+            except: pass
+
+        status_msg = await ctx.send(f"🧠 Analyzing {len(new_trades)} new trade setups...")
 
         async with aiohttp.ClientSession() as session:
-            for file_path in to_process:
-                with open(file_path, "rb") as img_file:
-                    img_b64 = base64.b64encode(img_file.read()).decode('utf-8')
+            highest_id = last_id
+            for msg_id, img_path in new_trades:
+                with open(img_path, "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode('utf-8')
 
                 prompt = """
-                Analyze this trading chart based on the TTrades Fractal Model.
-                Identify:
-                1. The Directional Bias (Bullish/Bearish).
-                2. Key FVG (Fair Value Gaps) or SMT Divergence visible.
-                3. The Change in State of Delivery (CISD).
-                Provide a short, structured summary of the setup.
+                Analyze this trading chart (TTrades Fractal Model). 
+                Extract specific 'good_habits' and 'mistakes'.
+                Respond STRICTLY in valid JSON:
+                {"good_habits": ["..."], "mistakes": ["..."]}
                 """
 
-                payload = {
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "images": [img_b64],
-                    "stream": False
-                }
+                payload = {"model": OLLAMA_MODEL, "prompt": prompt, "images": [img_b64], "stream": False}
 
                 async with session.post(OLLAMA_API_URL, json=payload) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
-                        analysis = data.get("response", "No analysis returned.")
-                        
-                        master_insights.append({
-                            "filename": file_path.name,
-                            "date": datetime.datetime.now().isoformat(),
-                            "analysis": analysis
-                        })
-                        
-                        # Update the tracker with the last successfully processed filename
-                        TRACKER_PATH.write_text(file_path.name)
-                    else:
-                        await ctx.send(f"⚠️ Failed to analyze `{file_path.name}` (Status: {resp.status})")
+                        res = await resp.json()
+                        try:
+                            # Clean potential markdown ticks from AI response
+                            raw_json = res["response"].replace("```json", "").replace("```", "").strip()
+                            parsed = json.loads(raw_json)
+                            
+                            master_data["good_habits"].extend(parsed.get("good_habits", []))
+                            master_data["mistakes"].extend(parsed.get("mistakes", []))
+                            
+                            highest_id = max(highest_id, msg_id)
+                            TRACKER_PATH.write_text(str(highest_id))
+                        except:
+                            print(f"Failed to parse AI response for {img_path.name}")
 
-        # Save all results to the central JSON database
+        # 4. Deduplicate and Save
+        master_data["good_habits"] = list(set(master_data["good_habits"]))
+        master_data["mistakes"] = list(set(master_data["mistakes"]))
+
         with open(INSIGHTS_PATH, "w") as f:
-            json.dump(master_insights, f, indent=4)
+            json.dump(master_data, f, indent=4)
 
-        await status_msg.edit(content=f"✅ Analysis complete. **{len(to_process)}** trades added to `master_insights.json`.")
+        await status_msg.edit(content=f"✅ Analysis complete. Added insights to `master_insights.json`.")
 
 async def setup(bot):
     await bot.add_cog(Trades(bot))
