@@ -49,3 +49,18 @@ jobs:
           
           # Restart the bot (stops the old version, starts the new version)
           sudo systemctl restart tradingbot
+          
+      - name: 5. Verify Deployment Health
+        run: |
+          # Wait a few seconds for the bot to attempt to log in
+          sleep 10
+          
+          # Check if the service is still active
+          if sudo systemctl is-active --quiet tradingbot; then
+            echo "✅ Bot is running successfully!"
+          else
+            echo "❌ Bot failed to start or crashed after restart!"
+            # Get the last 20 lines of logs to show in GitHub Actions
+            sudo journalctl -u tradingbot -n 20
+            exit 1
+          fi
