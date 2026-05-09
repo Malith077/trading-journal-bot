@@ -2,9 +2,16 @@ import discord
 import json
 import aiohttp
 import base64
+import datetime
 from pathlib import Path
 from discord.ext import commands
-from config import OLLAMA_API_URL, OLLAMA_MODEL, TRADES_DIR, INSIGHTS_PATH, TRACKER_PATH
+from config import (
+    OLLAMA_API_URL, 
+    OLLAMA_MODEL, 
+    TRADES_DIR, 
+    INSIGHTS_PATH, 
+    TRACKER_PATH
+)
 
 class Trades(commands.Cog):
     def __init__(self, bot):
@@ -24,7 +31,7 @@ class Trades(commands.Cog):
         
         count = 0
         for channel in category.text_channels:
-            # We preserve your subfolder structure
+            # Preserve subfolder structure per channel
             channel_path = TRADES_DIR / channel.name
             channel_path.mkdir(parents=True, exist_ok=True)
             
@@ -42,12 +49,12 @@ class Trades(commands.Cog):
 
     @commands.command(name="analyze_trades")
     async def analyze_trades(self, ctx):
-        """Processes new trades and extracts 'good_habits' and 'mistakes' for the Morning Prep."""
+        """Processes new trades with live progress updates and success tracking."""
         if not TRADES_DIR.exists():
             await ctx.send("❌ No trades directory found. Run `!sync_fractals` first.")
             return
 
-        # 1. Get last processed ID
+        # 1. Get last processed ID from tracker
         last_id = 0
         if TRACKER_PATH.exists():
             content = TRACKER_PATH.read_text().strip()
@@ -56,7 +63,6 @@ class Trades(commands.Cog):
 
         # 2. Find new files across all subfolders
         new_trades = []
-        # We look for files where the prefix (Message ID) is > last_id
         for img_path in TRADES_DIR.rglob("*"):
             if img_path.is_file() and "_" in img_path.name:
                 try:
@@ -72,6 +78,7 @@ class Trades(commands.Cog):
 
         # Sort chronologically by Message ID
         new_trades.sort(key=lambda x: x[0])
+        total_trades = len(new_trades)
 
         # 3. Load existing Master Insights
         master_data = {"good_habits": [], "mistakes": []}
@@ -79,49 +86,91 @@ class Trades(commands.Cog):
             try:
                 with open(INSIGHTS_PATH, "r") as f:
                     master_data = json.load(f)
-            except: pass
+            except:
+                pass
 
-        status_msg = await ctx.send(f"🧠 Analyzing {len(new_trades)} new trade setups...")
+        # Initial Status Message
+        status_msg = await ctx.send(f"🧠 Preparing to analyze **{total_trades}** trades...")
+
+        success_count = 0
+        fail_count = 0
 
         async with aiohttp.ClientSession() as session:
             highest_id = last_id
-            for msg_id, img_path in new_trades:
-                with open(img_path, "rb") as f:
-                    img_b64 = base64.b64encode(f.read()).decode('utf-8')
+            for idx, (msg_id, img_path) in enumerate(new_trades, 1):
+                # Update Discord UI at the start of every iteration
+                try:
+                    await status_msg.edit(content=(
+                        f"🧪 **Analysis in Progress**\n"
+                        f"🔢 Progress: `{idx}/{total_trades}`\n"
+                        f"📂 Current: `{img_path.name}`\n"
+                        f"✅ Success: `{success_count}` | ❌ Failed: `{fail_count}`"
+                    ))
+                except discord.HTTPException:
+                    pass # Prevents crashing if Discord rate-limits the edits
 
-                prompt = """
-                Analyze this trading chart (TTrades Fractal Model). 
-                Extract specific 'good_habits' and 'mistakes'.
-                Respond STRICTLY in valid JSON:
-                {"good_habits": ["..."], "mistakes": ["..."]}
-                """
+                try:
+                    with open(img_path, "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
 
-                payload = {"model": OLLAMA_MODEL, "prompt": prompt, "images": [img_b64], "stream": False}
+                    prompt = """
+                    Analyze this trading chart (TTrades Fractal Model). 
+                    Extract specific 'good_habits' and 'mistakes'.
+                    Respond STRICTLY in valid JSON:
+                    {"good_habits": ["..."], "mistakes": ["..."]}
+                    """
 
-                async with session.post(OLLAMA_API_URL, json=payload) as resp:
-                    if resp.status == 200:
-                        res = await resp.json()
-                        try:
-                            # Clean potential markdown ticks from AI response
-                            raw_json = res["response"].replace("```json", "").replace("```", "").strip()
-                            parsed = json.loads(raw_json)
-                            
-                            master_data["good_habits"].extend(parsed.get("good_habits", []))
-                            master_data["mistakes"].extend(parsed.get("mistakes", []))
-                            
-                            highest_id = max(highest_id, msg_id)
-                            TRACKER_PATH.write_text(str(highest_id))
-                        except:
-                            print(f"Failed to parse AI response for {img_path.name}")
+                    payload = {
+                        "model": OLLAMA_MODEL, 
+                        "prompt": prompt, 
+                        "images": [img_b64], 
+                        "stream": False
+                    }
 
-        # 4. Deduplicate and Save
+                    # Timeout added to prevent the Pi from hanging on heavy models
+                    async with session.post(OLLAMA_API_URL, json=payload, timeout=300) as resp:
+                        if resp.status == 200:
+                            res = await resp.json()
+                            try:
+                                raw_json = res["response"].replace("```json", "").replace("```", "").strip()
+                                parsed = json.loads(raw_json)
+                                
+                                master_data["good_habits"].extend(parsed.get("good_habits", []))
+                                master_data["mistakes"].extend(parsed.get("mistakes", []))
+                                
+                                success_count += 1
+                                highest_id = max(highest_id, msg_id)
+                                TRACKER_PATH.write_text(str(highest_id))
+                            except Exception as e:
+                                print(f"JSON Error on {img_path.name}: {e}")
+                                fail_count += 1
+                        else:
+                            print(f"API Error {resp.status} on {img_path.name}")
+                            fail_count += 1
+                except Exception as e:
+                    print(f"Critical Error processing {img_path.name}: {e}")
+                    fail_count += 1
+
+        # 4. Final deduplication and Save
         master_data["good_habits"] = list(set(master_data["good_habits"]))
         master_data["mistakes"] = list(set(master_data["mistakes"]))
 
         with open(INSIGHTS_PATH, "w") as f:
             json.dump(master_data, f, indent=4)
 
-        await status_msg.edit(content=f"✅ Analysis complete. Added insights to `master_insights.json`.")
+        # Final Report Embed
+        final_embed = discord.Embed(
+            title="✅ Analysis Session Complete",
+            description=f"Finished processing all **{total_trades}** trades in the queue.",
+            color=discord.Color.green()
+        )
+        final_embed.add_field(name="Total Found", value=str(total_trades))
+        final_embed.add_field(name="Successfully Indexed", value=f"✅ {success_count}")
+        final_embed.add_field(name="Failed/Errors", value=f"❌ {fail_count}")
+        final_embed.set_footer(text=f"Database: {INSIGHTS_PATH.name}")
+
+        await status_msg.edit(content=None, embed=final_embed)
+
 
 async def setup(bot):
     await bot.add_cog(Trades(bot))
