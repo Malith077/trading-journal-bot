@@ -1,5 +1,6 @@
 import discord
 import json
+import re
 import aiohttp
 import base64
 import asyncio
@@ -13,6 +14,35 @@ from config import (
     TRACKER_PATH
 )
 
+FAILED_TRADES_PATH = Path.cwd() / "failed_trades.json"
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds between retries
+
+
+def extract_json(raw: str) -> dict:
+    """
+    Robustly extracts a JSON object from a model response.
+    Tries three methods in order:
+      1. Direct parse (model returned clean JSON)
+      2. Regex extraction (JSON buried in surrounding text)
+      3. Fallback empty result (model response was completely unparseable)
+    """
+    cleaned = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r'\{.*?\}', cleaned, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    print(f"[WARN] Could not parse JSON from model response. Using empty fallback.\nRaw: {raw[:300]}")
+    return {"good_habits": [], "mistakes": []}
+
 
 class Trades(commands.Cog):
     def __init__(self, bot):
@@ -20,7 +50,6 @@ class Trades(commands.Cog):
 
     @commands.command(name="sync_fractals")
     async def sync_fractals(self, ctx):
-        """Syncs all channels in the 'Fractal_Trades' category to local JSON + images."""
         target_category_name = "Fractal_Trades"
         category = discord.utils.get(ctx.guild.categories, name=target_category_name)
 
@@ -28,8 +57,9 @@ class Trades(commands.Cog):
             await ctx.send(f"❌ Couldn't find category `{target_category_name}`.")
             return
 
-        await ctx.send(f"📥 Starting flat JSON sync for **{target_category_name}**...")
+        await ctx.send(f"📥 Starting full JSON and Image sync for **{target_category_name}**...")
 
+        total_images = 0
         for channel in category.text_channels:
             channel_path = TRADES_DIR / channel.name
             channel_path.mkdir(parents=True, exist_ok=True)
@@ -45,42 +75,39 @@ class Trades(commands.Cog):
                         "images": []
                     }
 
-                    for attachment in message.attachments:
-                        if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
-                            unique_filename = f"{message.id}_{attachment.filename}"
-                            file_path = channel_path / unique_filename
-                            await attachment.save(file_path)
-                            msg_entry["images"].append(unique_filename)
+                    if message.attachments:
+                        for attachment in message.attachments:
+                            if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+                                unique_filename = f"{message.id}_{attachment.filename}"
+                                file_path = channel_path / unique_filename
+
+                                if not file_path.exists():
+                                    await attachment.save(file_path)
+                                    total_images += 1
+
+                                msg_entry["images"].append(unique_filename)
 
                     channel_data.append(msg_entry)
 
             with open(channel_path / "history.json", "w", encoding="utf-8") as f:
                 json.dump(channel_data, f, indent=4)
 
-        await ctx.send("✅ Sync complete! Run `!analyze_trades` to process any new entries.")
+        await ctx.send(f"✅ Sync complete! Downloaded **{total_images}** new images and updated all `history.json` files.")
 
     @commands.command(name="analyze_trades")
     async def analyze_trades(self, ctx):
-        """Triggers the analysis loop as a background task to prevent Discord timeouts."""
-        base_dir = TRADES_DIR
-
-        if not base_dir.exists():
+        if not TRADES_DIR.exists():
             await ctx.send("❌ No trades directory found. Run `!sync_fractals` first.")
             return
 
-        # 1. Get last processed message ID
         last_id = 0
         if TRACKER_PATH.exists():
-            try:
-                content = TRACKER_PATH.read_text().strip()
-                if content.isdigit():
-                    last_id = int(content)
-            except Exception:
-                pass
+            content = TRACKER_PATH.read_text().strip()
+            if content.isdigit():
+                last_id = int(content)
 
-        # 2. Gather NEW trades from history.json files (same logic as Script 1)
         new_trades = []
-        for channel_dir in base_dir.iterdir():
+        for channel_dir in TRADES_DIR.iterdir():
             if channel_dir.is_dir():
                 history_file = channel_dir / "history.json"
                 if history_file.exists():
@@ -91,62 +118,78 @@ class Trades(commands.Cog):
                                 entry["_folder_path"] = str(channel_dir)
                                 new_trades.append(entry)
 
-        if not new_trades:
-            await ctx.send("✅ Master Insights is already up to date.")
+        retry_trades = []
+        if FAILED_TRADES_PATH.exists():
+            try:
+                with open(FAILED_TRADES_PATH, "r", encoding="utf-8") as f:
+                    retry_trades = json.load(f)
+                if retry_trades:
+                    await ctx.send(f"🔁 Found **{len(retry_trades)}** previously failed trade(s) to retry.")
+            except (json.JSONDecodeError, Exception):
+                retry_trades = []
+
+        new_trades.sort(key=lambda x: int(x["message_id"]))
+        all_trades = retry_trades + new_trades
+
+        if not all_trades:
+            await ctx.send("✅ Master Insights is already up to date!")
             return
 
-        # Start the background task so the bot stays responsive
-        self.bot.loop.create_task(self.run_analysis_loop(ctx, new_trades, last_id))
-        await ctx.send(f"🚀 Started background analysis for **{len(new_trades)}** trade(s). Monitoring progress...")
+        FAILED_TRADES_PATH.write_text("[]")
 
-    async def run_analysis_loop(self, ctx, new_trades, last_id):
-        """Internal loop that processes trades one-by-one with text + images (mirrors Script 1)."""
-        total_trades = len(new_trades)
+        self.bot.loop.create_task(self.run_analysis_loop(ctx, all_trades, last_id))
+        await ctx.send(f"🚀 Found **{len(all_trades)}** trade(s) to process. Starting background analysis...")
+
+    async def run_analysis_loop(self, ctx, all_trades, last_id):
+        total_trades = len(all_trades)
         success_count = 0
-        fail_count = 0
-        highest_id = last_id
+        fallback_count = 0
 
-        # Load current master insights
         master_data = {"good_habits": [], "mistakes": []}
         if INSIGHTS_PATH.exists():
             try:
-                with open(INSIGHTS_PATH, "r") as f:
+                with open(INSIGHTS_PATH, "r", encoding="utf-8") as f:
                     master_data = json.load(f)
-            except (json.JSONDecodeError, Exception):
+            except Exception:
                 pass
 
-        status_msg = await ctx.send(f"🧠 Found {total_trades} new trade(s). Analyzing them one by one...")
+        status_msg = await ctx.send("🧪 Initializing analysis...")
 
         async with aiohttp.ClientSession() as session:
-            for idx, trade in enumerate(new_trades, 1):
+            highest_id = last_id
+            for idx, trade in enumerate(all_trades, 1):
                 trade_id = int(trade["message_id"])
-                if trade_id > highest_id:
-                    highest_id = trade_id
 
-                # Encode images for THIS specific trade only (caps payload size)
+                try:
+                    await status_msg.edit(content=(
+                        f"📊 **Batch Progress:** `{idx}/{total_trades}`\n"
+                        f"🆔 **ID:** `{trade_id}`\n"
+                        f"✅ **Analysed:** `{success_count}` | ⚠️ **Fallback:** `{fallback_count}`"
+                    ))
+                except Exception:
+                    pass
+
                 images_b64 = []
                 for img_name in trade.get("images", []):
                     img_path = Path(trade["_folder_path"]) / img_name
                     if img_path.exists():
-                        with open(img_path, "rb") as img_file:
-                            images_b64.append(base64.b64encode(img_file.read()).decode("utf-8"))
+                        with open(img_path, "rb") as f:
+                            images_b64.append(base64.b64encode(f.read()).decode("utf-8"))
 
-                # Rich prompt: includes the trader's written notes AND charts (mirrors Script 1)
                 prompt = f"""
-Analyze this single trading journal entry and its attached chart(s).
-The trader utilizes the TTrades Fractal Model (SMT, CISD, FVG).
+                    Analyze this single trading journal entry and its attached chart(s).
+                    The trader utilizes the TTrades Fractal Model (SMT, CISD, FVG).
 
-Trade Notes:
-{trade['content']}
+                    Trade Notes:
+                    {trade['content']}
 
-TASK:
-Extract the specific 'good_habits' and 'mistakes' mentioned or visible in THIS SPECIFIC trade.
-Keep the insights concise and actionable.
-If there are no mistakes, leave the mistakes array empty. If no good habits, leave it empty.
+                    TASK:
+                    Extract the specific 'good_habits' and 'mistakes' mentioned or visible in THIS SPECIFIC trade.
+                    Keep the insights concise and actionable.
 
-Respond STRICTLY in valid JSON format:
-{{"good_habits": ["..."], "mistakes": ["..."]}}
-"""
+                    Respond STRICTLY in valid JSON format with no extra text:
+                    {{"good_habits": ["..."], "mistakes": ["..."]}}
+                    """
 
                 payload = {
                     "model": OLLAMA_MODEL,
@@ -155,55 +198,71 @@ Respond STRICTLY in valid JSON format:
                     "stream": False
                 }
 
-                try:
-                    async with session.post(OLLAMA_API_URL, json=payload, timeout=120) as resp:
-                        if resp.status == 200:
-                            result = await resp.json()
-                            raw_text = result["response"]
-                            cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
-                            parsed = json.loads(cleaned_text)
+                parsed = None
+                last_error = None
 
-                            master_data["good_habits"].extend(parsed.get("good_habits", []))
-                            master_data["mistakes"].extend(parsed.get("mistakes", []))
-
-                            success_count += 1
-                            # Write tracker after each successful trade (crash-resilient)
-                            TRACKER_PATH.write_text(str(highest_id))
-                        else:
-                            print(f"Trade {trade_id} failed with status: {resp.status}")
-                            fail_count += 1
-                except Exception as e:
-                    print(f"Error parsing trade {trade_id}: {e}")
-                    fail_count += 1
-
-                # Update Discord status every 2 trades (matches Script 1 rhythm)
-                if idx % 2 == 0 or idx == total_trades:
+                # Retry loop — up to MAX_RETRIES attempts per trade
+                for attempt in range(1, MAX_RETRIES + 1):
                     try:
-                        await status_msg.edit(content=f"🧠 Analyzing trades... ({idx}/{total_trades} completed)")
-                    except Exception:
-                        pass
+                        async with session.post(OLLAMA_API_URL, json=payload, timeout=180) as resp:
+                            if resp.status == 200:
+                                res = await resp.json()
+                                parsed = extract_json(res["response"])
+                                break  # success — exit retry loop
+                            else:
+                                last_error = f"HTTP {resp.status}"
+                                print(f"Trade {trade_id} attempt {attempt} failed — {last_error}")
+                    except asyncio.TimeoutError:
+                        last_error = "Timeout"
+                        print(f"Trade {trade_id} attempt {attempt} timed out.")
+                    except Exception as e:
+                        last_error = str(e)
+                        print(f"Trade {trade_id} attempt {attempt} error: {e}")
 
-                # Let the event loop breathe between calls
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY)
+
+                # Use result or empty fallback — trade is ALWAYS marked as processed
+                if parsed is not None:
+                    master_data["good_habits"].extend(parsed.get("good_habits", []))
+                    master_data["mistakes"].extend(parsed.get("mistakes", []))
+                    success_count += 1
+                else:
+                    print(f"Trade {trade_id} exhausted all {MAX_RETRIES} retries ({last_error}). Using empty fallback.")
+                    fallback_count += 1
+
+                # Always advance tracker regardless of outcome
+                if trade_id > highest_id:
+                    highest_id = trade_id
+                    TRACKER_PATH.write_text(str(highest_id))
+
                 await asyncio.sleep(0.5)
 
-        # Deduplicate (same as Script 1)
         master_data["good_habits"] = list(set(master_data["good_habits"]))
         master_data["mistakes"] = list(set(master_data["mistakes"]))
 
-        # Final save
-        with open(INSIGHTS_PATH, "w") as f:
-            json.dump(master_data, f, indent=4)
+        with open(INSIGHTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(master_data, f, indent=4, ensure_ascii=False)
 
-        # Final confirmation embed (mirrors Script 1)
+        FAILED_TRADES_PATH.write_text("[]")
+
         embed = discord.Embed(
             title="✅ Analysis Complete",
-            description=f"Successfully analyzed {success_count} trade(s).",
-            color=discord.Color.green()
+            description=f"Processed all **{total_trades}** trade(s).",
+            color=discord.Color.green() if fallback_count == 0 else discord.Color.orange()
         )
-        embed.add_field(name="Total Strengths in DB", value=str(len(master_data["good_habits"])), inline=True)
-        embed.add_field(name="Total Mistakes in DB", value=str(len(master_data["mistakes"])), inline=True)
-        if fail_count > 0:
-            embed.add_field(name="Failed", value=str(fail_count), inline=True)
+        embed.add_field(name="✅ Full Analysis", value=str(success_count), inline=True)
+        embed.add_field(name="⚠️ Empty Fallback", value=str(fallback_count), inline=True)
+        embed.add_field(name="📚 Total Strengths", value=str(len(master_data["good_habits"])), inline=True)
+        embed.add_field(name="⚠️ Total Mistakes", value=str(len(master_data["mistakes"])), inline=True)
+
+        if fallback_count > 0:
+            embed.add_field(
+                name="ℹ️ About Fallbacks",
+                value=f"`{fallback_count}` trade(s) couldn't be parsed after {MAX_RETRIES} attempts and were skipped with an empty result. Check your terminal logs for details.",
+                inline=False
+            )
+
         await ctx.send(embed=embed)
 
 
