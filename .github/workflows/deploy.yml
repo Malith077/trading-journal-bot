@@ -39,8 +39,6 @@ jobs:
         run: |
           cd /home/malith/bot
 
-          ollama pull nomic-embed-text
-          ./venv/bin/python scripts/reindex_all.py
           # Create venv only if it was wiped (e.g., after a reflash)
           if [ ! -d "venv" ]; then
               python3 -m venv venv
@@ -49,6 +47,9 @@ jobs:
           # Install any new libraries from requirements.txt
           ./venv/bin/pip install --upgrade pip
           ./venv/bin/pip install -r requirements.txt
+
+          ollama pull nomic-embed-text
+          ./venv/bin/python scripts/reindex_all.py
           
           # Restart the bot (stops the old version, starts the new version)
           sudo systemctl restart tradingbot
