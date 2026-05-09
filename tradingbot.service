@@ -1,6 +1,6 @@
 [Unit]
 Description=Discord Trading Bot
-After=network-target
+After=network.target
 
 [Service]
 User=malith
