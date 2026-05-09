@@ -30,6 +30,25 @@ async def on_ready():
     print(f'Logged in as {bot.user} | Tarneit Local Time: {datetime.datetime.now()}')
     print('--------------------------')
 
+# In bot.py
+@bot.event
+async def on_ready():
+    # Log to terminal for debugging in Tarneit
+    print(f'🚀 Logged in as {bot.user} | {datetime.datetime.now()}')
+    
+    # 1. Get the notification channel from your config
+    from config import REMINDER_CHANNEL_ID
+    channel = bot.get_channel(REMINDER_CHANNEL_ID)
+    
+    # 2. Send the "I'm Alive" heartbeat
+    if channel:
+        try:
+            await channel.send("✨ **New version of me is deployed. I'm alive!**")
+            print("✅ Deployment heartbeat sent to Discord.")
+        except Exception as e:
+            print(f"⚠️ Failed to send heartbeat: {e}")
+            
+    print('--------------------------')
 if __name__ == "__main__":
     if not BOT_TOKEN:
         print("❌ ERROR: BOT_KEY is missing! Check your .env file.")
