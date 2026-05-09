@@ -10,3 +10,4 @@ pyvenv.cfg
 /downloads
 /venv/
 __pycache__/
+chroma_db/
