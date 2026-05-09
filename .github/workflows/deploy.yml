@@ -15,12 +15,16 @@ jobs:
 
       - name: 2. Sync Files to Pi
         run: |
-          # Sync all files except local data, secrets, and the virtual env
+          # Sync files while protecting all local data stores
           rsync -avz --delete \
             --exclude '.env' \
             --exclude 'venv/' \
             --exclude 'downloads/' \
+            --exclude 'knowledge_base/' \
             --exclude 'chroma_db/' \
+            --exclude 'master_insights.json' \
+            --exclude 'last_analyzed.txt' \
+            --exclude '.req_hash' \
             --exclude '.git/' \
             ./ /home/malith/bot/
 
