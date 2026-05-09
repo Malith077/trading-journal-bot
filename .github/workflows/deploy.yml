@@ -39,19 +39,21 @@ jobs:
         run: |
           cd /home/malith/bot
 
-          # Create venv only if it was wiped (e.g., after a reflash)
-          if [ ! -d "venv" ]; then
-              python3 -m venv venv
-          fi
+          # Wipe the venv to clear out the legacy ChromaDB/Pydantic versions
+          rm -rf venv
+          python3 -m venv venv
           
-          # Install any new libraries from requirements.txt
+          # Install fresh modern dependencies
           ./venv/bin/pip install --upgrade pip
           ./venv/bin/pip install -r requirements.txt
 
+          # Ensure the embedding model is ready
           ollama pull nomic-embed-text
+
+          # Run the re-index script
           ./venv/bin/python scripts/reindex_all.py
           
-          # Restart the bot (stops the old version, starts the new version)
+          # Restart the bot
           sudo systemctl restart tradingbot
 
       - name: 5. Verify Deployment Health

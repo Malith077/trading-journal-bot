@@ -1,5 +1,5 @@
 discord.py==2.7.1
 aiohttp==3.13.5
 python-dotenv==1.2.2
-chromadb
-pydantic<2.0.0
+chromadb>=0.4.15
+pydantic-settings
