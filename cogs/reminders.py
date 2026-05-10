@@ -62,6 +62,7 @@ class Reminders(commands.Cog):
 
     @commands.command(name="morning_prep")
     async def morning_prep(self, ctx):
+        """Manually trigger today's morning trading prep reminder."""
         await ctx.send("🎲 Shuffling your history...")
         await self.daily_reminder()
 

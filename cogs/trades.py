@@ -50,6 +50,7 @@ class Trades(commands.Cog):
 
     @commands.command(name="sync_fractals")
     async def sync_fractals(self, ctx):
+        """Download all trades and images from the Fractal_Trades category."""
         target_category_name = "Fractal_Trades"
         category = discord.utils.get(ctx.guild.categories, name=target_category_name)
 
@@ -96,6 +97,7 @@ class Trades(commands.Cog):
 
     @commands.command(name="analyze_trades")
     async def analyze_trades(self, ctx):
+        """AI-analyze new trades and update master_insights.json."""
         if not TRADES_DIR.exists():
             await ctx.send("❌ No trades directory found. Run `!sync_fractals` first.")
             return
@@ -176,26 +178,40 @@ class Trades(commands.Cog):
                         with open(img_path, "rb") as f:
                             images_b64.append(base64.b64encode(f.read()).decode("utf-8"))
 
-                prompt = f"""
-                    Analyze this single trading journal entry and its attached chart(s).
-                    The trader utilizes the TTrades Fractal Model (SMT, CISD, FVG).
+                prompt = f"""Analyze this single trading journal entry and its attached chart(s).
+The trader utilizes the TTrades Fractal Model (SMT, CISD, FVG).
 
-                    Trade Notes:
-                    {trade['content']}
+Here are examples of how to extract insights from trade notes:
 
-                    TASK:
-                    Extract the specific 'good_habits' and 'mistakes' mentioned or visible in THIS SPECIFIC trade.
-                    Keep the insights concise and actionable.
+EXAMPLE 1:
+Trade Notes: "Waited for the hourly C2 candle to close bearish, confirmed CISD on the 5m, then entered short at the continuation OB. Hit 2R target at the previous day low."
+Output: {{"good_habits": ["Waiting for hourly C2 candle closure before entry", "Confirming CISD on 5-minute timeframe for precision", "Using continuation Order Block for entry", "Hitting predefined 2R target with discipline"], "mistakes": []}}
 
-                    Respond STRICTLY in valid JSON format with no extra text:
-                    {{"good_habits": ["..."], "mistakes": ["..."]}}
-                    """
+EXAMPLE 2:
+Trade Notes: "Took a long after seeing one bullish candle. No CISD confirmation, no C2 closure. Got stopped out. Then re-entered the same direction out of frustration."
+Output: {{"good_habits": [], "mistakes": ["Entering without CISD confirmation", "Not waiting for C2 candle closure", "Revenge trading after initial loss"]}}
+
+EXAMPLE 3:
+Trade Notes: "Daily bias was bearish. Waited for London sweep of Asia high, then looked for shorts. Found IC-CISD within the C2 candle on the hourly. Entered at the FVG but placed stop too tight and got stopped out before the move."
+Output: {{"good_habits": ["Establishing daily bias before session", "Waiting for London sweep of Asia session high", "Identifying IC-CISD within the C2 candle", "Using FVG for entry confluence"], "mistakes": ["Stop loss placed too tight, stopped out before the anticipated move"]}}
+
+NOW ANALYZE THIS TRADE:
+Trade Notes:
+{trade['content']}
+
+TASK:
+Extract the specific 'good_habits' and 'mistakes' mentioned or visible in THIS SPECIFIC trade.
+Keep each insight to a single concise sentence. Do not repeat insights from the examples above unless they genuinely apply.
+
+Respond STRICTLY in valid JSON format with no extra text:
+{{"good_habits": ["..."], "mistakes": ["..."]}}"""
 
                 payload = {
                     "model": OLLAMA_MODEL,
                     "prompt": prompt,
                     "images": images_b64,
-                    "stream": False
+                    "stream": False,
+                    "format": "json"
                 }
 
                 parsed = None
