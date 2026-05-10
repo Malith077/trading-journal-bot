@@ -12,10 +12,7 @@ class Knowledge(commands.Cog):
 
     @commands.command(name="extract_knowledge")
     async def extract_knowledge(self, ctx, *, channel_input: str = None):
-        """
-        Synthesizes a channel's history AND screenshots into a Knowledge Article 
-        and indexes it for RAG.
-        """
+        """Synthesize a channel into a Knowledge Article and index it for RAG."""
         target_channel = None
         
         # 1. Resolve the Target Channel
