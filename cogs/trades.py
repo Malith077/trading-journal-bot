@@ -6,12 +6,14 @@ import base64
 import asyncio
 from pathlib import Path
 from discord.ext import commands
+from discord import ui
 from config import (
     OLLAMA_API_URL,
     OLLAMA_MODEL,
     TRADES_DIR,
     INSIGHTS_PATH,
-    TRACKER_PATH
+    TRACKER_PATH,
+    CATEGORY_NAME
 )
 
 FAILED_TRADES_PATH = Path.cwd() / "failed_trades.json"
@@ -44,9 +46,196 @@ def extract_json(raw: str) -> dict:
     return {"good_habits": [], "mistakes": []}
 
 
+# ──────────────────────────────────────────────
+# Trade Reflection UI Components
+# ──────────────────────────────────────────────
+
+class ReflectionModal(ui.Modal, title="📝 Trade Reflection"):
+    """Discord Modal (form) that collects the 3 reflection questions."""
+
+    why_entered = ui.TextInput(
+        label="Why did I enter this trade?",
+        placeholder="e.g. CISD confirmed on 5m, swept Asia high, daily bias bearish...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000
+    )
+    how_felt = ui.TextInput(
+        label="How did I feel?",
+        placeholder="e.g. Confident, anxious, FOMO, patient...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000
+    )
+    what_learned = ui.TextInput(
+        label="What did I learn?",
+        placeholder="e.g. Need to wait for C2 closure, stop was too tight...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000
+    )
+
+    def __init__(self, trades_dir: Path, channel_name: str):
+        super().__init__()
+        self.trades_dir = trades_dir
+        self.channel_name = channel_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        """Save reflections to JSON and pin a summary in the channel."""
+        reflections = {
+            "why_entered": self.why_entered.value,
+            "how_felt": self.how_felt.value,
+            "what_learned": self.what_learned.value
+        }
+
+        # Save to disk
+        channel_dir = self.trades_dir / self.channel_name
+        channel_dir.mkdir(parents=True, exist_ok=True)
+        reflections_path = channel_dir / "reflections.json"
+        with open(reflections_path, "w", encoding="utf-8") as f:
+            json.dump(reflections, f, indent=4, ensure_ascii=False)
+
+        # Post and pin a summary embed
+        embed = discord.Embed(
+            title="📝 Trade Reflection Recorded",
+            color=discord.Color.teal()
+        )
+        embed.add_field(name="Why did I enter?", value=reflections["why_entered"], inline=False)
+        embed.add_field(name="How did I feel?", value=reflections["how_felt"], inline=False)
+        embed.add_field(name="What did I learn?", value=reflections["what_learned"], inline=False)
+
+        await interaction.response.send_message(embed=embed)
+        response_msg = await interaction.original_response()
+        try:
+            await response_msg.pin()
+        except discord.Forbidden:
+            pass  # Bot may lack pin permissions
+
+
+class ReflectionView(ui.View):
+    """Persistent button that opens the ReflectionModal."""
+
+    def __init__(self, trades_dir: Path, channel_name: str):
+        super().__init__(timeout=None)  # Never expires
+        self.trades_dir = trades_dir
+        self.channel_name = channel_name
+
+    @ui.button(label="📝 Record Reflections", style=discord.ButtonStyle.primary, custom_id="trade_reflection_btn")
+    async def open_modal(self, interaction: discord.Interaction, button: ui.Button):
+        modal = ReflectionModal(self.trades_dir, self.channel_name)
+        await interaction.response.send_modal(modal)
+
+
 class Trades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Auto-sync debounce: guild_id → asyncio.Task
+        self._pending_sync: dict[int, asyncio.Task] = {}
+
+    # --- Channel Creation Listener ---
+
+    @commands.Cog.listener()
+    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
+        """Post reflection prompt when a new channel is created under Fractal_Trades."""
+        if not isinstance(channel, discord.TextChannel):
+            return
+        if not channel.category or channel.category.name != CATEGORY_NAME:
+            return
+
+        embed = discord.Embed(
+            title="🆕 New Trade Channel",
+            description=(
+                f"Welcome to **#{channel.name}**!\n\n"
+                "When you're ready, click below to record your reflections for this trade. "
+                "Take your time — the button stays here."
+            ),
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="📋 Questions", value=(
+            "1️⃣ **Why did I enter this trade?**\n"
+            "2️⃣ **How did I feel?**\n"
+            "3️⃣ **What did I learn?**"
+        ), inline=False)
+
+        view = ReflectionView(TRADES_DIR, channel.name)
+        await channel.send(embed=embed, view=view)
+
+    # --- Auto-Sync Listener ---
+    # Watches for new messages in Fractal_Trades channels.
+    # After 2 minutes of silence, auto-runs sync + analysis.
+
+    AUTO_SYNC_DELAY = 120  # seconds to wait after last message
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Detect new posts in Fractal_Trades and schedule auto sync+analysis."""
+        if message.author.bot:
+            return
+        if not message.guild:
+            return
+
+        channel = message.channel
+        if not hasattr(channel, "category") or not channel.category:
+            return
+        if channel.category.name != CATEGORY_NAME:
+            return
+
+        guild_id = message.guild.id
+
+        # Cancel any existing pending sync for this guild (reset the timer)
+        if guild_id in self._pending_sync:
+            self._pending_sync[guild_id].cancel()
+
+        # Schedule a new delayed sync
+        self._pending_sync[guild_id] = self.bot.loop.create_task(
+            self._delayed_sync(message.guild, channel)
+        )
+
+    async def _delayed_sync(self, guild: discord.Guild, trigger_channel: discord.TextChannel):
+        """Wait for silence, then run sync + analysis in the trigger channel."""
+        try:
+            await asyncio.sleep(self.AUTO_SYNC_DELAY)
+        except asyncio.CancelledError:
+            return  # Timer was reset by a new message
+
+        # Build a lightweight context-like object for reusing sync/analysis logic
+        ctx = await self._make_auto_ctx(trigger_channel)
+        if not ctx:
+            return
+
+        print(f"⚡ Auto-sync triggered by activity in #{trigger_channel.name}")
+        await self.sync_fractals.callback(self, ctx)
+        await self.analyze_trades.callback(self, ctx)
+
+        # Clean up
+        self._pending_sync.pop(guild.id, None)
+
+    async def _make_auto_ctx(self, channel: discord.TextChannel):
+        """Create a minimal context-like object so sync/analysis can send messages."""
+        ctx = type("AutoCtx", (), {})()
+        ctx.guild = channel.guild
+        ctx.channel = channel
+        ctx.send = channel.send
+        return ctx
+
+    def _get_reflections_context(self, trade: dict) -> str:
+        """Load reflections.json for a trade's channel and format as prompt context."""
+        folder = Path(trade.get("_folder_path", ""))
+        reflections_path = folder / "reflections.json"
+        if not reflections_path.exists():
+            return ""
+
+        try:
+            with open(reflections_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return (
+                "\nTrader's Self-Reflection:\n"
+                f"- Why I entered: {data.get('why_entered', 'N/A')}\n"
+                f"- How I felt: {data.get('how_felt', 'N/A')}\n"
+                f"- What I learned: {data.get('what_learned', 'N/A')}\n"
+            )
+        except (json.JSONDecodeError, Exception):
+            return ""
 
     @commands.command(name="sync_fractals")
     async def sync_fractals(self, ctx):
@@ -198,9 +387,10 @@ Output: {{"good_habits": ["Establishing daily bias before session", "Waiting for
 NOW ANALYZE THIS TRADE:
 Trade Notes:
 {trade['content']}
-
+{self._get_reflections_context(trade)}
 TASK:
 Extract the specific 'good_habits' and 'mistakes' mentioned or visible in THIS SPECIFIC trade.
+Also consider the trader's own reflections if provided above — they reveal emotional and decision-making patterns.
 Keep each insight to a single concise sentence. Do not repeat insights from the examples above unless they genuinely apply.
 
 Respond STRICTLY in valid JSON format with no extra text:
