@@ -1,5 +1,6 @@
 import os
 import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -8,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # --- Discord Config ---
 BOT_TOKEN = os.getenv('BOT_KEY')
 REMINDER_CHANNEL_ID = 1501833920449351720
-REMINDER_TIME = datetime.time(hour=8, minute=0)
+REMINDER_TIME = datetime.time(hour=9, minute=30, tzinfo=ZoneInfo("Australia/Melbourne"))
 HEALTH_CHANNEL_NAME = "bothealth"
 HEALTH_CHANNEL_ID = 1502556311869591723
 # --- Ollama Config ---
