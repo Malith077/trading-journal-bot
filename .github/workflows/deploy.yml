@@ -13,7 +13,16 @@ jobs:
       - name: 1. Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 2. Sync Files to Pi
+      - name: 2. Run Unit Tests
+        run: |
+          python3 -m venv .test_venv
+          .test_venv/bin/pip install --upgrade pip -q
+          .test_venv/bin/pip install -r requirements.txt -q
+          .test_venv/bin/pip install pytest pytest-asyncio -q
+          .test_venv/bin/python -m pytest tests/ -v
+          rm -rf .test_venv
+
+      - name: 3. Sync Files to Pi
         run: |
           # Sync files while protecting all local data stores
           rsync -avz --delete \
@@ -28,7 +37,7 @@ jobs:
             --exclude '.git/' \
             ./ /home/malith/bot/
 
-      - name: 3. Update System Service File
+      - name: 4. Update System Service File
         run: |
           # Overwrite the old system configuration with the one from the repo
           sudo cp /home/malith/bot/tradingbot.service /etc/systemd/system/tradingbot.service
@@ -39,7 +48,7 @@ jobs:
           # Ensure the service is set to start on boot
           sudo systemctl enable tradingbot
 
-      - name: 4. Update Dependencies & Restart
+      - name: 5. Update Dependencies & Restart
         run: |
           cd /home/malith/bot
 
@@ -60,7 +69,7 @@ jobs:
           # Restart the bot
           sudo systemctl restart tradingbot
 
-      - name: 5. Verify Deployment Health
+      - name: 6. Verify Deployment Health
         run: |
           # Wait a few seconds for the bot to attempt to log in
           sleep 10
