@@ -73,6 +73,13 @@ class RAGService:
         file_name = file_path.name
         chunks = chunk_markdown(content)
 
+        # Derive a human-readable topic from the filename
+        # e.g. "asia-london-ny-relation_article.md" → "asia london ny relation"
+        topic = file_name.replace("_article.md", "").replace("_", " ").replace("-", " ")
+
+        # Prepend topic context to each chunk so the embedding includes it
+        enriched_chunks = [f"[Topic: {topic}]\n{chunk}" for chunk in chunks]
+
         # Remove any old chunks from this file before re-indexing
         existing = self.collection.get(where={"source": file_name})
         if existing and existing["ids"]:
@@ -80,14 +87,14 @@ class RAGService:
 
         # Upsert each chunk with a unique ID
         ids = [f"{file_name}::chunk_{i}" for i in range(len(chunks))]
-        metadatas = [{"source": file_name, "chunk_index": i} for i in range(len(chunks))]
+        metadatas = [{"source": file_name, "chunk_index": i, "topic": topic} for i in range(len(chunks))]
 
         self.collection.upsert(
             ids=ids,
-            documents=chunks,
+            documents=enriched_chunks,
             metadatas=metadatas
         )
-        print(f"Indexed: {file_name} → {len(chunks)} chunk(s)")
+        print(f"Indexed: {file_name} → {len(chunks)} chunk(s) [topic: {topic}]")
 
     def query_knowledge(self, query_text, n_results=5):
         """Retrieves the most relevant chunks AND their source filenames."""
