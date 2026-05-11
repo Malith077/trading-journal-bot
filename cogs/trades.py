@@ -115,14 +115,13 @@ class ReflectionModal(ui.Modal, title="📝 Trade Reflection"):
 class ReflectionView(ui.View):
     """Persistent button that opens the ReflectionModal."""
 
-    def __init__(self, trades_dir: Path, channel_name: str):
+    def __init__(self):
         super().__init__(timeout=None)  # Never expires
-        self.trades_dir = trades_dir
-        self.channel_name = channel_name
 
     @ui.button(label="📝 Record Reflections", style=discord.ButtonStyle.primary, custom_id="trade_reflection_btn")
     async def open_modal(self, interaction: discord.Interaction, button: ui.Button):
-        modal = ReflectionModal(self.trades_dir, self.channel_name)
+        channel_name = interaction.channel.name
+        modal = ReflectionModal(TRADES_DIR, channel_name)
         await interaction.response.send_modal(modal)
 
 
@@ -157,7 +156,7 @@ class Trades(commands.Cog):
             "3️⃣ **What did I learn?**"
         ), inline=False)
 
-        view = ReflectionView(TRADES_DIR, channel.name)
+        view = ReflectionView()
         await channel.send(embed=embed, view=view)
 
     # --- Auto-Sync Listener ---
@@ -480,3 +479,4 @@ Respond STRICTLY in valid JSON format with no extra text:
 
 async def setup(bot):
     await bot.add_cog(Trades(bot))
+    bot.add_view(ReflectionView())
