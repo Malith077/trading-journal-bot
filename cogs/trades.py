@@ -214,8 +214,14 @@ class Trades(commands.Cog):
         """Create a minimal context-like object so sync/analysis can send messages."""
         ctx = type("AutoCtx", (), {})()
         ctx.guild = channel.guild
-        ctx.channel = channel
-        ctx.send = channel.send
+        
+        # Redirect auto-sync status messages to 'general' chat to avoid cluttering trade reviews
+        target_channel = discord.utils.get(channel.guild.text_channels, name="general")
+        if not target_channel:
+            target_channel = channel
+            
+        ctx.channel = target_channel
+        ctx.send = target_channel.send
         return ctx
 
     def _get_reflections_context(self, trade: dict) -> str:
