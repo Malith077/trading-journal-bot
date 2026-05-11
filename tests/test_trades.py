@@ -458,7 +458,8 @@ class TestReflections:
 
     # --- _get_reflections_context ---
 
-    def test_reflections_context_with_file(self, trades_cog, tmp_path):
+    @pytest.mark.asyncio
+    async def test_reflections_context_with_file(self, trades_cog, tmp_path):
         """Returns formatted reflection text when reflections.json exists."""
         reflections = {
             "why_entered": "CISD confirmed on 5m",
@@ -468,23 +469,25 @@ class TestReflections:
         (tmp_path / "reflections.json").write_text(json.dumps(reflections))
 
         trade = {"_folder_path": str(tmp_path)}
-        result = trades_cog._get_reflections_context(trade)
+        result = await trades_cog._get_reflections_context(trade)
 
         assert "CISD confirmed on 5m" in result
         assert "Confident and patient" in result
         assert "Wait for C2 closure" in result
 
-    def test_reflections_context_no_file(self, trades_cog, tmp_path):
+    @pytest.mark.asyncio
+    async def test_reflections_context_no_file(self, trades_cog, tmp_path):
         """Returns empty string when no reflections.json exists."""
         trade = {"_folder_path": str(tmp_path)}
-        result = trades_cog._get_reflections_context(trade)
+        result = await trades_cog._get_reflections_context(trade)
         assert result == ""
 
-    def test_reflections_context_corrupt_file(self, trades_cog, tmp_path):
+    @pytest.mark.asyncio
+    async def test_reflections_context_corrupt_file(self, trades_cog, tmp_path):
         """Returns empty string when reflections.json is corrupt."""
         (tmp_path / "reflections.json").write_text("not valid json{{{")
         trade = {"_folder_path": str(tmp_path)}
-        result = trades_cog._get_reflections_context(trade)
+        result = await trades_cog._get_reflections_context(trade)
         assert result == ""
 
     # --- ReflectionModal on_submit ---

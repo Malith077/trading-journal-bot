@@ -4,3 +4,4 @@ python-dotenv==1.2.2
 chromadb>=0.4.15
 ollama
 pydantic-settings
+aiofiles==23.2.1

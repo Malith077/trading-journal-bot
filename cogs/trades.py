@@ -4,6 +4,7 @@ import re
 import aiohttp
 import base64
 import asyncio
+import aiofiles
 from pathlib import Path
 from discord.ext import commands
 from discord import ui
@@ -92,8 +93,8 @@ class ReflectionModal(ui.Modal, title="📝 Trade Reflection"):
         channel_dir = self.trades_dir / self.channel_name
         channel_dir.mkdir(parents=True, exist_ok=True)
         reflections_path = channel_dir / "reflections.json"
-        with open(reflections_path, "w", encoding="utf-8") as f:
-            json.dump(reflections, f, indent=4, ensure_ascii=False)
+        async with aiofiles.open(reflections_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(reflections, indent=4, ensure_ascii=False))
 
         # Post and pin a summary embed
         embed = discord.Embed(
@@ -223,7 +224,7 @@ class Trades(commands.Cog):
         ctx.send = target_channel.send
         return ctx
 
-    def _get_reflections_context(self, trade: dict) -> str:
+    async def _get_reflections_context(self, trade: dict) -> str:
         """Load reflections.json for a trade's channel and format as prompt context."""
         folder = Path(trade.get("_folder_path", ""))
         reflections_path = folder / "reflections.json"
@@ -231,8 +232,9 @@ class Trades(commands.Cog):
             return ""
 
         try:
-            with open(reflections_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            async with aiofiles.open(reflections_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                data = json.loads(content)
             return (
                 "\nTrader's Self-Reflection:\n"
                 f"- Why I entered: {data.get('why_entered', 'N/A')}\n"
@@ -284,8 +286,8 @@ class Trades(commands.Cog):
 
                     channel_data.append(msg_entry)
 
-            with open(channel_path / "history.json", "w", encoding="utf-8") as f:
-                json.dump(channel_data, f, indent=4)
+            async with aiofiles.open(channel_path / "history.json", "w", encoding="utf-8") as f:
+                await f.write(json.dumps(channel_data, indent=4))
 
         await ctx.send(f"✅ Sync complete! Downloaded **{total_images}** new images and updated all `history.json` files.")
 
@@ -298,7 +300,8 @@ class Trades(commands.Cog):
 
         last_id = 0
         if TRACKER_PATH.exists():
-            content = TRACKER_PATH.read_text().strip()
+            async with aiofiles.open(TRACKER_PATH, "r") as f:
+                content = (await f.read()).strip()
             if content.isdigit():
                 last_id = int(content)
 
@@ -307,8 +310,8 @@ class Trades(commands.Cog):
             if channel_dir.is_dir():
                 history_file = channel_dir / "history.json"
                 if history_file.exists():
-                    with open(history_file, "r", encoding="utf-8") as f:
-                        channel_data = json.load(f)
+                    async with aiofiles.open(history_file, "r", encoding="utf-8") as f:
+                        channel_data = json.loads(await f.read())
                         for entry in channel_data:
                             if int(entry["message_id"]) > last_id:
                                 entry["_folder_path"] = str(channel_dir)
@@ -317,8 +320,8 @@ class Trades(commands.Cog):
         retry_trades = []
         if FAILED_TRADES_PATH.exists():
             try:
-                with open(FAILED_TRADES_PATH, "r", encoding="utf-8") as f:
-                    retry_trades = json.load(f)
+                async with aiofiles.open(FAILED_TRADES_PATH, "r", encoding="utf-8") as f:
+                    retry_trades = json.loads(await f.read())
                 if retry_trades:
                     await ctx.send(f"🔁 Found **{len(retry_trades)}** previously failed trade(s) to retry.")
             except (json.JSONDecodeError, Exception):
@@ -331,7 +334,8 @@ class Trades(commands.Cog):
             await ctx.send("✅ Master Insights is already up to date!")
             return
 
-        FAILED_TRADES_PATH.write_text("[]")
+        async with aiofiles.open(FAILED_TRADES_PATH, "w", encoding="utf-8") as f:
+            await f.write("[]")
 
         self.bot.loop.create_task(self.run_analysis_loop(ctx, all_trades, last_id))
         await ctx.send(f"🚀 Found **{len(all_trades)}** trade(s) to process. Starting background analysis...")
@@ -344,8 +348,8 @@ class Trades(commands.Cog):
         master_data = {"good_habits": [], "mistakes": []}
         if INSIGHTS_PATH.exists():
             try:
-                with open(INSIGHTS_PATH, "r", encoding="utf-8") as f:
-                    master_data = json.load(f)
+                async with aiofiles.open(INSIGHTS_PATH, "r", encoding="utf-8") as f:
+                    master_data = json.loads(await f.read())
             except Exception:
                 pass
 
@@ -369,9 +373,10 @@ class Trades(commands.Cog):
                 for img_name in trade.get("images", []):
                     img_path = Path(trade["_folder_path"]) / img_name
                     if img_path.exists():
-                        with open(img_path, "rb") as f:
-                            images_b64.append(base64.b64encode(f.read()).decode("utf-8"))
+                        async with aiofiles.open(img_path, "rb") as f:
+                            images_b64.append(base64.b64encode(await f.read()).decode("utf-8"))
 
+                reflections_context = await self._get_reflections_context(trade)
                 prompt = f"""Analyze this single trading journal entry and its attached chart(s).
 The trader utilizes the TTrades Fractal Model (SMT, CISD, FVG).
 
@@ -392,7 +397,7 @@ Output: {{"good_habits": ["Establishing daily bias before session", "Waiting for
 NOW ANALYZE THIS TRADE:
 Trade Notes:
 {trade['content']}
-{self._get_reflections_context(trade)}
+{reflections_context}
 TASK:
 Extract the specific 'good_habits' and 'mistakes' mentioned or visible in THIS SPECIFIC trade.
 Also consider the trader's own reflections if provided above — they reveal emotional and decision-making patterns.
@@ -445,17 +450,19 @@ Respond STRICTLY in valid JSON format with no extra text:
                 # Always advance tracker regardless of outcome
                 if trade_id > highest_id:
                     highest_id = trade_id
-                    TRACKER_PATH.write_text(str(highest_id))
+                    async with aiofiles.open(TRACKER_PATH, "w") as f:
+                        await f.write(str(highest_id))
 
                 await asyncio.sleep(0.5)
 
         master_data["good_habits"] = list(set(master_data["good_habits"]))
         master_data["mistakes"] = list(set(master_data["mistakes"]))
 
-        with open(INSIGHTS_PATH, "w", encoding="utf-8") as f:
-            json.dump(master_data, f, indent=4, ensure_ascii=False)
+        async with aiofiles.open(INSIGHTS_PATH, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(master_data, indent=4, ensure_ascii=False))
 
-        FAILED_TRADES_PATH.write_text("[]")
+        async with aiofiles.open(FAILED_TRADES_PATH, "w", encoding="utf-8") as f:
+            await f.write("[]")
 
         embed = discord.Embed(
             title="✅ Analysis Complete",
