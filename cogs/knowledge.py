@@ -1,6 +1,8 @@
 import discord
 import aiohttp
 import base64
+import asyncio
+import aiofiles
 from pathlib import Path
 from discord.ext import commands
 from config import OLLAMA_API_URL, OLLAMA_MODEL, KB_DIR
@@ -97,12 +99,12 @@ class Knowledge(commands.Cog):
                         file_name = f"{target_channel.name}_article.md"
                         file_path = KB_DIR / file_name
                         
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            f.write(article_content)
+                        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+                            await f.write(article_content)
 
                         # 6. Index for RAG
                         await status_msg.edit(content="🚀 Article generated. Indexing into vector database...")
-                        rag_service.index_markdown_file(file_path)
+                        await asyncio.to_thread(rag_service.index_markdown_file, file_path)
 
                         # 7. Final Confirmation
                         embed = discord.Embed(

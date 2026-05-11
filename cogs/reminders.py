@@ -1,6 +1,7 @@
 import discord
 import json
 import random
+import aiofiles
 import datetime
 from pathlib import Path
 from discord.ext import commands, tasks
@@ -22,8 +23,8 @@ class Reminders(commands.Cog):
         # 1. Load random lessons from the dictionary structure
         good_sample, bad_sample = [], []
         if INSIGHTS_PATH.exists():
-            with open(INSIGHTS_PATH, "r") as f:
-                data = json.load(f)
+            async with aiofiles.open(INSIGHTS_PATH, "r") as f:
+                data = json.loads(await f.read())
                 goods = data.get("good_habits", [])
                 bads = data.get("mistakes", [])
                 good_sample = random.sample(goods, min(3, len(goods)))
@@ -37,8 +38,8 @@ class Reminders(commands.Cog):
             if articles:
                 choice = random.choice(articles)
                 kb_title = choice.stem.replace("_", " ").title()
-                with open(choice, "r") as f:
-                    kb_text = f.read()[:500] + "..."
+                async with aiofiles.open(choice, "r") as f:
+                    kb_text = (await f.read())[:500] + "..."
 
         # 3. Build Embed
         embed = discord.Embed(

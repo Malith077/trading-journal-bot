@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import discord
 from discord.ext import commands
 from scripts.reindex_all import flush_and_reindex
@@ -16,7 +17,7 @@ class RAG(commands.Cog):
         await ctx.send("🧹 Wiping vector database and re-indexing all markdown files...")
         
         try:
-            flush_and_reindex()
+            await asyncio.to_thread(flush_and_reindex)
             await ctx.send("✅ Re-indexing successful! I am now up to date with the /knowledge_base folder.")
         except Exception as e:
             await ctx.send(f"❌ Re-indexing failed: {str(e)}")
@@ -28,7 +29,7 @@ class RAG(commands.Cog):
         status_msg = await ctx.send(f"🔎 Searching knowledge for: `{question}`...")
 
         # 1. Retrieve context and the list of source files
-        context, sources = rag_service.query_knowledge(question)
+        context, sources = await asyncio.to_thread(rag_service.query_knowledge, question)
         
         if not context:
             await status_msg.edit(content="I couldn't find any specific knowledge on that topic.")
