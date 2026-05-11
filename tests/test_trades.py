@@ -363,6 +363,7 @@ class TestAutoSync:
         """_make_auto_ctx creates a context with guild, channel, and send."""
         channel = MagicMock()
         channel.guild = MagicMock()
+        channel.guild.text_channels = []  # Ensure no 'general' channel is found
         channel.send = AsyncMock()
 
         ctx = await trades_cog._make_auto_ctx(channel)
@@ -370,6 +371,24 @@ class TestAutoSync:
         assert ctx.guild == channel.guild
         assert ctx.channel == channel
         assert ctx.send == channel.send
+
+    @pytest.mark.asyncio
+    async def test_make_auto_ctx_with_general(self, trades_cog):
+        """_make_auto_ctx redirects to 'general' channel if it exists."""
+        channel = MagicMock()
+        channel.guild = MagicMock()
+        
+        general_channel = MagicMock()
+        general_channel.name = "general"
+        general_channel.send = AsyncMock()
+        
+        channel.guild.text_channels = [general_channel]
+
+        ctx = await trades_cog._make_auto_ctx(channel)
+
+        assert ctx.guild == channel.guild
+        assert ctx.channel == general_channel
+        assert ctx.send == general_channel.send
 
     @pytest.mark.asyncio
     async def test_delayed_sync_cancelled(self, trades_cog):
