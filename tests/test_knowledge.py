@@ -4,6 +4,7 @@ Unit tests for cogs/knowledge.py
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
+import discord
 from discord.ext import commands
 
 from cogs.knowledge import Knowledge
@@ -20,23 +21,18 @@ class TestKnowledgeCog:
         return Knowledge(bot)
 
     @pytest.fixture
-    def ctx(self):
-        ctx = AsyncMock()
-        ctx.guild = MagicMock()
-        ctx.channel = MagicMock()
-        ctx.channel.name = "current_channel"
-        return ctx
+    def interaction(self):
+        interaction = AsyncMock()
+        interaction.guild = MagicMock()
+        interaction.channel = MagicMock()
+        interaction.channel.name = "current_channel"
+        interaction.response = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        return interaction
 
     @pytest.mark.asyncio
-    async def test_channel_not_found(self, cog, ctx):
-        with patch.object(commands.TextChannelConverter, "convert", side_effect=commands.ChannelNotFound("bad")):
-            ctx.guild.text_channels = []
-            await cog.extract_knowledge.callback(cog, ctx, channel_input="nonexistent")
-        assert any("couldn't find" in str(c).lower() for c in ctx.send.call_args_list)
-
-    @pytest.mark.asyncio
-    async def test_no_content(self, cog, ctx):
-        target = MagicMock()
+    async def test_no_content(self, cog, interaction):
+        target = MagicMock(spec=discord.TextChannel)
         target.name = "empty_channel"
 
         async def empty_history(**kwargs):
@@ -44,17 +40,16 @@ class TestKnowledgeCog:
             yield
         target.history = empty_history
 
-        status_msg = AsyncMock()
-        ctx.send = AsyncMock(return_value=status_msg)
-        ctx.channel = target
-
-        await cog.extract_knowledge.callback(cog, ctx)
-        status_msg.edit.assert_called()
-        assert "No content" in status_msg.edit.call_args.kwargs.get("content", "")
+        await cog.extract_knowledge.callback(cog, interaction, target_channel=target)
+        interaction.edit_original_response.assert_called()
+        
+        # Check if any call has "No content"
+        calls = str(interaction.edit_original_response.call_args_list)
+        assert "No content" in calls
 
     @pytest.mark.asyncio
-    async def test_successful_extraction(self, cog, ctx, tmp_path):
-        target = MagicMock()
+    async def test_successful_extraction(self, cog, interaction, tmp_path):
+        target = MagicMock(spec=discord.TextChannel)
         target.name = "strategy_channel"
 
         msg = MagicMock()
@@ -67,10 +62,6 @@ class TestKnowledgeCog:
         async def mock_history(**kwargs):
             yield msg
         target.history = mock_history
-
-        status_msg = AsyncMock()
-        ctx.send = AsyncMock(return_value=status_msg)
-        ctx.channel = target
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -89,7 +80,7 @@ class TestKnowledgeCog:
             ))
             mock_cls.return_value = mock_session
 
-            await cog.extract_knowledge.callback(cog, ctx)
+            await cog.extract_knowledge.callback(cog, interaction, target_channel=target)
 
         article = tmp_path / "strategy_channel_article.md"
         assert article.exists()
@@ -97,8 +88,8 @@ class TestKnowledgeCog:
         mock_rag.index_markdown_file.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_ollama_error(self, cog, ctx):
-        target = MagicMock()
+    async def test_ollama_error(self, cog, interaction):
+        target = MagicMock(spec=discord.TextChannel)
         target.name = "test_ch"
 
         msg = MagicMock()
@@ -111,10 +102,6 @@ class TestKnowledgeCog:
         async def mock_history(**kwargs):
             yield msg
         target.history = mock_history
-
-        status_msg = AsyncMock()
-        ctx.send = AsyncMock(return_value=status_msg)
-        ctx.channel = target
 
         mock_resp = AsyncMock()
         mock_resp.status = 500
@@ -130,6 +117,6 @@ class TestKnowledgeCog:
             ))
             mock_cls.return_value = mock_session
 
-            await cog.extract_knowledge.callback(cog, ctx)
+            await cog.extract_knowledge.callback(cog, interaction, target_channel=target)
 
-        assert any("Ollama Error" in str(c) for c in ctx.send.call_args_list)
+        assert any("Ollama Error" in str(c) for c in interaction.edit_original_response.call_args_list)

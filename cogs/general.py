@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 
@@ -8,45 +9,35 @@ class General(commands.Cog):
         # Remove the default help command so ours takes over
         self.bot.remove_command("help")
 
-    @commands.command(name="help")
-    async def custom_help(self, ctx):
+    @app_commands.command(name="help", description="Shows all available commands.")
+    async def custom_help(self, interaction: discord.Interaction):
         """Shows all available commands grouped by module."""
         embed = discord.Embed(
             title="📖 Command Reference",
-            description="Here's everything I can do. Use `!<command>` to run one.",
+            description="Here's everything I can do. Use `/` to run a command.",
             color=discord.Color.blurple()
         )
 
-        for cog_name, cog in sorted(self.bot.cogs.items()):
-            # Get all non-hidden commands in this cog
-            cog_commands = [cmd for cmd in cog.get_commands() if not cmd.hidden]
-            if not cog_commands:
-                continue
-
-            lines = []
-            for cmd in cog_commands:
-                brief = cmd.help.split("\n")[0] if cmd.help else "No description"
-                lines.append(f"`!{cmd.name}` — {brief}")
-
+        for cmd in self.bot.tree.walk_commands():
             embed.add_field(
-                name=f"🔹 {cog_name}",
-                value="\n".join(lines),
+                name=f"/{cmd.name}",
+                value=cmd.description or "No description",
                 inline=False
             )
 
-        embed.set_footer(text="Tip: Type !help to see this again at any time.")
-        await ctx.send(embed=embed)
+        embed.set_footer(text="Tip: Type / to see native Discord autocomplete.")
+        await interaction.response.send_message(embed=embed)
 
-    @commands.command()
-    async def ping(self, ctx):
+    @app_commands.command(name="ping", description="Check if the bot is alive.")
+    async def ping(self, interaction: discord.Interaction):
         """Check if the bot is alive."""
-        await ctx.send('Pong! 🏓')
+        await interaction.response.send_message('Pong! 🏓')
 
-    @commands.command()
-    async def list_channels(self, ctx):
+    @app_commands.command(name="list_channels", description="List all text channels the bot can see.")
+    async def list_channels(self, interaction: discord.Interaction):
         """List all text channels the bot can see."""
-        accessible = [c.name for c in ctx.guild.text_channels]
-        await ctx.send(f"I can see **{len(accessible)}** channels. Check terminal for list.")
+        accessible = [c.name for c in interaction.guild.text_channels]
+        await interaction.response.send_message(f"I can see **{len(accessible)}** channels. Check terminal for list.")
         print(f"Accessible: {accessible}")
 
 

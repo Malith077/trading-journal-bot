@@ -20,7 +20,8 @@ class TradingAssistant(commands.Bot):
             if filename.endswith('.py') and filename != "__init__.py":
                 await self.load_extension(f'cogs.{filename[:-3]}')
         
-        print("✅ All Cogs loaded successfully.")
+        synced = await self.tree.sync()
+        print(f"✅ All Cogs loaded successfully. Synced {len(synced)} command(s).")
 
 bot = TradingAssistant()
 

@@ -4,6 +4,7 @@ import base64
 import asyncio
 import aiofiles
 from pathlib import Path
+from discord import app_commands
 from discord.ext import commands
 from config import OLLAMA_API_URL, OLLAMA_MODEL, KB_DIR
 from services.rag_service import rag_service
@@ -12,25 +13,20 @@ class Knowledge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="extract_knowledge")
-    async def extract_knowledge(self, ctx, *, channel_input: str = None):
+    @app_commands.command(name="extract_knowledge", description="Synthesize a channel into a Knowledge Article and index it.")
+    @app_commands.describe(target_channel="The channel to extract knowledge from. Defaults to the current channel.")
+    async def extract_knowledge(self, interaction: discord.Interaction, target_channel: discord.TextChannel = None):
         """Synthesize a channel into a Knowledge Article and index it for RAG."""
-        target_channel = None
+        await interaction.response.defer(thinking=True)
         
-        # 1. Resolve the Target Channel
-        if channel_input:
-            try:
-                target_channel = await commands.TextChannelConverter().convert(ctx, channel_input)
-            except commands.ChannelNotFound:
-                target_channel = discord.utils.get(ctx.guild.text_channels, name=channel_input)
-        else:
-            target_channel = ctx.channel
-
         if not target_channel:
-            await ctx.send(f"❌ I couldn't find channel `{channel_input}`. Check permissions!")
+            target_channel = interaction.channel
+
+        if not isinstance(target_channel, discord.TextChannel):
+            await interaction.edit_original_response(content="❌ This command can only be used on Text Channels.")
             return
 
-        status_msg = await ctx.send(f"📚 Gathering text and screenshots from **#{target_channel.name}**...")
+        await interaction.edit_original_response(content=f"📚 Gathering text and screenshots from **#{target_channel.name}**...")
 
         full_text_log = []
         images_b64 = []
@@ -51,7 +47,7 @@ class Knowledge(commands.Cog):
                         images_b64.append(base64.b64encode(img_bytes).decode("utf-8"))
 
         if not full_text_log and not images_b64:
-            await status_msg.edit(content="❌ No content found to analyze.")
+            await interaction.edit_original_response(content="❌ No content found to analyze.")
             return
 
         combined_content = "\n".join(full_text_log)
@@ -85,7 +81,7 @@ class Knowledge(commands.Cog):
             "stream": False
         }
 
-        await status_msg.edit(content=f"🧠 Processing {len(images_b64)} images and history with AI...")
+        await interaction.edit_original_response(content=f"🧠 Processing {len(images_b64)} images and history with AI...")
 
         async with aiohttp.ClientSession() as session:
             try:
@@ -103,7 +99,7 @@ class Knowledge(commands.Cog):
                             await f.write(article_content)
 
                         # 6. Index for RAG
-                        await status_msg.edit(content="🚀 Article generated. Indexing into vector database...")
+                        await interaction.edit_original_response(content="🚀 Article generated. Indexing into vector database...")
                         await asyncio.to_thread(rag_service.index_markdown_file, file_path)
 
                         # 7. Final Confirmation
@@ -114,13 +110,12 @@ class Knowledge(commands.Cog):
                         embed.add_field(name="Source", value=f"#{target_channel.name}", inline=True)
                         embed.add_field(name="Status", value="Indexed for `!ask`", inline=True)
                         embed.set_footer(text=f"Saved to /knowledge_base/{file_name}")
-                        await ctx.send(embed=embed)
-                        await status_msg.delete()
+                        await interaction.edit_original_response(content=None, embed=embed)
                     else:
                         err_text = await response.text()
-                        await ctx.send(f"❌ Ollama Error {response.status}: {err_text[:200]}")
+                        await interaction.edit_original_response(content=f"❌ Ollama Error {response.status}: {err_text[:200]}")
             except Exception as e:
-                await ctx.send(f"❌ Processing Error: {str(e)}")
+                await interaction.edit_original_response(content=f"❌ Processing Error: {str(e)}")
 
 async def setup(bot):
     await bot.add_cog(Knowledge(bot))

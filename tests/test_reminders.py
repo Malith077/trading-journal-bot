@@ -32,9 +32,10 @@ class TestRemindersCog:
         return cog
 
     @pytest.fixture
-    def ctx(self):
-        ctx = AsyncMock()
-        return ctx
+    def interaction(self):
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        return interaction
 
     # --- daily_reminder ---
 
@@ -99,9 +100,9 @@ class TestRemindersCog:
     # --- morning_prep ---
 
     @pytest.mark.asyncio
-    async def test_morning_prep(self, cog, ctx):
+    async def test_morning_prep(self, cog, interaction):
         """morning_prep sends message and triggers daily_reminder."""
-        await cog.morning_prep.callback(cog, ctx)
-        ctx.send.assert_called_once()
-        assert "Shuffling" in ctx.send.call_args[0][0]
+        await cog.morning_prep.callback(cog, interaction)
+        interaction.response.send_message.assert_called_once()
+        assert "Shuffling" in interaction.response.send_message.call_args[0][0]
         cog.daily_reminder.assert_called_once()

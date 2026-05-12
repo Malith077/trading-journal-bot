@@ -5,7 +5,10 @@ import aiohttp
 import base64
 import asyncio
 import aiofiles
+import asyncio
+import aiofiles
 from pathlib import Path
+from discord import app_commands
 from discord.ext import commands
 from discord import ui
 from config import (
@@ -198,31 +201,37 @@ class Trades(commands.Cog):
         except asyncio.CancelledError:
             return  # Timer was reset by a new message
 
-        # Build a lightweight context-like object for reusing sync/analysis logic
-        ctx = await self._make_auto_ctx(trigger_channel)
-        if not ctx:
+        # Build a lightweight interaction-like object for reusing sync/analysis logic
+        interaction = await self._make_auto_interaction(trigger_channel)
+        if not interaction:
             return
 
         print(f"⚡ Auto-sync triggered by activity in #{trigger_channel.name}")
-        await self.sync_fractals.callback(self, ctx)
-        await self.analyze_trades.callback(self, ctx)
+        
+        # Manually invoke the logic directly (instead of using the slash command callback)
+        await self._do_sync_fractals(interaction.guild, interaction.followup.send)
+        await self._do_analyze_trades(interaction)
 
         # Clean up
         self._pending_sync.pop(guild.id, None)
 
-    async def _make_auto_ctx(self, channel: discord.TextChannel):
-        """Create a minimal context-like object so sync/analysis can send messages."""
-        ctx = type("AutoCtx", (), {})()
-        ctx.guild = channel.guild
-        
+    async def _make_auto_interaction(self, channel: discord.TextChannel):
+        """Create a minimal interaction-like object so sync/analysis can send messages."""
         # Redirect auto-sync status messages to 'general' chat to avoid cluttering trade reviews
         target_channel = discord.utils.get(channel.guild.text_channels, name="general")
         if not target_channel:
             target_channel = channel
-            
-        ctx.channel = target_channel
-        ctx.send = target_channel.send
-        return ctx
+
+        class AutoFollowup:
+            async def send(self, *args, **kwargs):
+                return await target_channel.send(*args, **kwargs)
+
+        class AutoInteraction:
+            def __init__(self):
+                self.guild = channel.guild
+                self.followup = AutoFollowup()
+                
+        return AutoInteraction()
 
     async def _get_reflections_context(self, trade: dict) -> str:
         """Load reflections.json for a trade's channel and format as prompt context."""
@@ -244,17 +253,21 @@ class Trades(commands.Cog):
         except (json.JSONDecodeError, Exception):
             return ""
 
-    @commands.command(name="sync_fractals")
-    async def sync_fractals(self, ctx):
+    @app_commands.command(name="sync_fractals", description="Download all trades and images from the Fractal_Trades category.")
+    async def sync_fractals(self, interaction: discord.Interaction):
         """Download all trades and images from the Fractal_Trades category."""
+        await interaction.response.defer()
+        await self._do_sync_fractals(interaction.guild, interaction.followup.send)
+
+    async def _do_sync_fractals(self, guild: discord.Guild, send_func):
         target_category_name = "Fractal_Trades"
-        category = discord.utils.get(ctx.guild.categories, name=target_category_name)
+        category = discord.utils.get(guild.categories, name=target_category_name)
 
         if not category:
-            await ctx.send(f"❌ Couldn't find category `{target_category_name}`.")
+            await send_func(f"❌ Couldn't find category `{target_category_name}`.")
             return
 
-        await ctx.send(f"📥 Starting full JSON and Image sync for **{target_category_name}**...")
+        await send_func(f"📥 Starting full JSON and Image sync for **{target_category_name}**...")
 
         total_images = 0
         for channel in category.text_channels:
@@ -289,13 +302,20 @@ class Trades(commands.Cog):
             async with aiofiles.open(channel_path / "history.json", "w", encoding="utf-8") as f:
                 await f.write(json.dumps(channel_data, indent=4))
 
-        await ctx.send(f"✅ Sync complete! Downloaded **{total_images}** new images and updated all `history.json` files.")
+        await send_func(f"✅ Sync complete! Downloaded **{total_images}** new images and updated all `history.json` files.")
 
-    @commands.command(name="analyze_trades")
-    async def analyze_trades(self, ctx):
+    @app_commands.command(name="analyze_trades", description="AI-analyze new trades and update master_insights.json.")
+    async def analyze_trades(self, interaction: discord.Interaction):
         """AI-analyze new trades and update master_insights.json."""
+        try:
+            await interaction.response.defer()
+        except AttributeError:
+            pass # Handle AutoInteraction case
+        await self._do_analyze_trades(interaction)
+
+    async def _do_analyze_trades(self, interaction):
         if not TRADES_DIR.exists():
-            await ctx.send("❌ No trades directory found. Run `!sync_fractals` first.")
+            await interaction.followup.send("❌ No trades directory found. Run `/sync_fractals` first.")
             return
 
         last_id = 0
@@ -323,7 +343,7 @@ class Trades(commands.Cog):
                 async with aiofiles.open(FAILED_TRADES_PATH, "r", encoding="utf-8") as f:
                     retry_trades = json.loads(await f.read())
                 if retry_trades:
-                    await ctx.send(f"🔁 Found **{len(retry_trades)}** previously failed trade(s) to retry.")
+                    await interaction.followup.send(f"🔁 Found **{len(retry_trades)}** previously failed trade(s) to retry.")
             except (json.JSONDecodeError, Exception):
                 retry_trades = []
 
@@ -331,16 +351,16 @@ class Trades(commands.Cog):
         all_trades = retry_trades + new_trades
 
         if not all_trades:
-            await ctx.send("✅ Master Insights is already up to date!")
+            await interaction.followup.send("✅ Master Insights is already up to date!")
             return
 
         async with aiofiles.open(FAILED_TRADES_PATH, "w", encoding="utf-8") as f:
             await f.write("[]")
 
-        self.bot.loop.create_task(self.run_analysis_loop(ctx, all_trades, last_id))
-        await ctx.send(f"🚀 Found **{len(all_trades)}** trade(s) to process. Starting background analysis...")
+        self.bot.loop.create_task(self.run_analysis_loop(interaction, all_trades, last_id))
+        await interaction.followup.send(f"🚀 Found **{len(all_trades)}** trade(s) to process. Starting background analysis...")
 
-    async def run_analysis_loop(self, ctx, all_trades, last_id):
+    async def run_analysis_loop(self, interaction, all_trades, last_id):
         total_trades = len(all_trades)
         success_count = 0
         fallback_count = 0
@@ -353,7 +373,7 @@ class Trades(commands.Cog):
             except Exception:
                 pass
 
-        status_msg = await ctx.send("🧪 Initializing analysis...")
+        status_msg = await interaction.followup.send("🧪 Initializing analysis...")
 
         async with aiohttp.ClientSession() as session:
             highest_id = last_id
@@ -481,7 +501,7 @@ Respond STRICTLY in valid JSON format with no extra text:
                 inline=False
             )
 
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot):

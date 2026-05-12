@@ -17,23 +17,22 @@ class TestRAGCog:
         return RAG(bot)
 
     @pytest.fixture
-    def ctx(self):
-        ctx = AsyncMock()
-        status_msg = AsyncMock()
-        ctx.send = AsyncMock(return_value=status_msg)
-        return ctx
+    def interaction(self):
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        return interaction
 
     @pytest.mark.asyncio
-    async def test_ask_no_context(self, cog, ctx):
+    async def test_ask_no_context(self, cog, interaction):
         with patch("cogs.rag.rag_service") as mock_rag:
             mock_rag.query_knowledge.return_value = ("", [])
-            await cog.ask_bot.callback(cog, ctx, question="What is CISD?")
-        status_msg = ctx.send.return_value
-        status_msg.edit.assert_called()
-        assert "couldn't find" in status_msg.edit.call_args.kwargs["content"].lower()
+            await cog.ask_bot.callback(cog, interaction, question="What is CISD?")
+        interaction.edit_original_response.assert_called()
+        assert "couldn't find" in interaction.edit_original_response.call_args.kwargs["content"].lower()
 
     @pytest.mark.asyncio
-    async def test_ask_successful(self, cog, ctx):
+    async def test_ask_successful(self, cog, interaction):
         mock_resp = AsyncMock()
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value={"response": "CISD means Change in State."})
@@ -49,13 +48,13 @@ class TestRAGCog:
                 __aexit__=AsyncMock(return_value=False)
             ))
             mock_cls.return_value = mock_session
-            await cog.ask_bot.callback(cog, ctx, question="What is CISD?")
+            await cog.ask_bot.callback(cog, interaction, question="What is CISD?")
 
-        embed_calls = [c for c in ctx.send.call_args_list if c.kwargs.get("embed")]
+        embed_calls = [c for c in interaction.edit_original_response.call_args_list if c.kwargs.get("embed")]
         assert len(embed_calls) >= 1
 
     @pytest.mark.asyncio
-    async def test_ask_api_error(self, cog, ctx):
+    async def test_ask_api_error(self, cog, interaction):
         mock_resp = AsyncMock()
         mock_resp.status = 500
 
@@ -70,20 +69,19 @@ class TestRAGCog:
                 __aexit__=AsyncMock(return_value=False)
             ))
             mock_cls.return_value = mock_session
-            await cog.ask_bot.callback(cog, ctx, question="test")
+            await cog.ask_bot.callback(cog, interaction, question="test")
 
-        status_msg = ctx.send.return_value
-        status_msg.edit.assert_called()
-        assert "error" in status_msg.edit.call_args.kwargs["content"].lower()
+        interaction.edit_original_response.assert_called()
+        assert "error" in interaction.edit_original_response.call_args.kwargs["content"].lower()
 
     @pytest.mark.asyncio
-    async def test_reindex_success(self, cog, ctx):
+    async def test_reindex_success(self, cog, interaction):
         with patch("cogs.rag.flush_and_reindex"):
-            await cog.manual_reindex.callback(cog, ctx)
-        assert any("successful" in str(c).lower() for c in ctx.send.call_args_list)
+            await cog.manual_reindex.callback(cog, interaction)
+        assert any("successful" in str(c).lower() for c in interaction.edit_original_response.call_args_list)
 
     @pytest.mark.asyncio
-    async def test_reindex_failure(self, cog, ctx):
+    async def test_reindex_failure(self, cog, interaction):
         with patch("cogs.rag.flush_and_reindex", side_effect=RuntimeError("DB error")):
-            await cog.manual_reindex.callback(cog, ctx)
-        assert any("failed" in str(c).lower() for c in ctx.send.call_args_list)
+            await cog.manual_reindex.callback(cog, interaction)
+        assert any("failed" in str(c).lower() for c in interaction.edit_original_response.call_args_list)
