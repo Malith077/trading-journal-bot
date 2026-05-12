@@ -7,6 +7,29 @@ from scripts.reindex_all import flush_and_reindex
 from services.rag_service import rag_service
 from config import OLLAMA_API_URL, OLLAMA_MODEL
 
+def chunk_text(text: str, max_length: int = 4000) -> list[str]:
+    """Splits a string into chunks of maximum length, preferably at newlines."""
+    if len(text) <= max_length:
+        return [text]
+        
+    chunks = []
+    while text:
+        if len(text) <= max_length:
+            chunks.append(text)
+            break
+            
+        split_idx = text.rfind('\n', 0, max_length)
+        if split_idx == -1:
+            split_idx = text.rfind(' ', 0, max_length)
+            
+        if split_idx == -1:
+            split_idx = max_length
+            
+        chunks.append(text[:split_idx])
+        text = text[split_idx:].lstrip()
+        
+    return chunks
+
 class RAG(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -64,18 +87,24 @@ class RAG(commands.Cog):
                     result = await response.json()
                     answer = result["response"]
                     
-                    # 4. Build a clean Embed with Sources
-                    embed = discord.Embed(
-                        title="🧠 AI Strategy Insight",
-                        description=answer[:4000], # Discord limit safety
-                        color=discord.Color.green()
-                    )
+                    chunks = chunk_text(answer)
                     
-                    # List which files were actually pulled from ChromaDB
-                    source_list = "\n".join([f"• `{s}`" for s in sources])
-                    embed.add_field(name="📚 Sources Used", value=source_list, inline=False)
-                    
-                    await interaction.edit_original_response(content=None, embed=embed)
+                    for i, chunk in enumerate(chunks):
+                        embed = discord.Embed(
+                            title="🧠 AI Strategy Insight" if i == 0 else f"🧠 AI Strategy Insight (Part {i+1})",
+                            description=chunk,
+                            color=discord.Color.green()
+                        )
+                        
+                        # Only add sources to the last chunk
+                        if i == len(chunks) - 1:
+                            source_list = "\n".join([f"• `{s}`" for s in sources])
+                            embed.add_field(name="📚 Sources Used", value=source_list, inline=False)
+                            
+                        if i == 0:
+                            await interaction.edit_original_response(content=None, embed=embed)
+                        else:
+                            await interaction.followup.send(embed=embed)
                 else:
                     await interaction.edit_original_response(content="❌ Error contacting the AI brain.")
 
