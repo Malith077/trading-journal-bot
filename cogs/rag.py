@@ -1,6 +1,7 @@
 import aiohttp
 import asyncio
 import discord
+from discord import app_commands
 from discord.ext import commands
 from scripts.reindex_all import flush_and_reindex
 from services.rag_service import rag_service
@@ -10,29 +11,32 @@ class RAG(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="reindex")
-    @commands.has_permissions(administrator=True)
-    async def manual_reindex(self, ctx):
+    @app_commands.command(name="reindex", description="Force a full wipe and rebuild of the knowledge base.")
+    @app_commands.default_permissions(administrator=True)
+    async def manual_reindex(self, interaction: discord.Interaction):
         """Force a full wipe and rebuild of the knowledge base."""
-        await ctx.send("🧹 Wiping vector database and re-indexing all markdown files...")
+        await interaction.response.defer()
+        await interaction.edit_original_response(content="🧹 Wiping vector database and re-indexing all markdown files...")
         
         try:
             await asyncio.to_thread(flush_and_reindex)
-            await ctx.send("✅ Re-indexing successful! I am now up to date with the /knowledge_base folder.")
+            await interaction.edit_original_response(content="✅ Re-indexing successful! I am now up to date with the /knowledge_base folder.")
         except Exception as e:
-            await ctx.send(f"❌ Re-indexing failed: {str(e)}")
+            await interaction.edit_original_response(content=f"❌ Re-indexing failed: {str(e)}")
 
 
-    @commands.command(name="ask")
-    async def ask_bot(self, ctx, *, question: str):
+    @app_commands.command(name="ask", description="Queries the knowledge base and shows sources used.")
+    @app_commands.describe(question="The question to ask the knowledge base.")
+    async def ask_bot(self, interaction: discord.Interaction, question: str):
         """Queries the knowledge base and shows sources used."""
-        status_msg = await ctx.send(f"🔎 Searching knowledge for: `{question}`...")
+        await interaction.response.defer(thinking=True)
+        await interaction.edit_original_response(content=f"🔎 Searching knowledge for: `{question}`...")
 
         # 1. Retrieve context and the list of source files
         context, sources = await asyncio.to_thread(rag_service.query_knowledge, question)
         
         if not context:
-            await status_msg.edit(content="I couldn't find any specific knowledge on that topic.")
+            await interaction.edit_original_response(content="I couldn't find any specific knowledge on that topic.")
             return
 
         # 2. Build the RAG Prompt
@@ -71,10 +75,9 @@ class RAG(commands.Cog):
                     source_list = "\n".join([f"• `{s}`" for s in sources])
                     embed.add_field(name="📚 Sources Used", value=source_list, inline=False)
                     
-                    await ctx.send(embed=embed)
-                    await status_msg.delete()
+                    await interaction.edit_original_response(content=None, embed=embed)
                 else:
-                    await status_msg.edit(content="❌ Error contacting the AI brain.")
+                    await interaction.edit_original_response(content="❌ Error contacting the AI brain.")
 
 async def setup(bot):
     await bot.add_cog(RAG(bot))

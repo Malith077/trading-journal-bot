@@ -4,6 +4,7 @@ import random
 import aiofiles
 import datetime
 from pathlib import Path
+from discord import app_commands
 from discord.ext import commands, tasks
 from config import REMINDER_CHANNEL_ID, REMINDER_TIME, INSIGHTS_PATH, KB_DIR
 
@@ -61,10 +62,10 @@ class Reminders(commands.Cog):
     async def before_reminder(self):
         await self.bot.wait_until_ready()
 
-    @commands.command(name="morning_prep")
-    async def morning_prep(self, ctx):
+    @app_commands.command(name="morning_prep", description="Manually trigger today's morning trading prep reminder.")
+    async def morning_prep(self, interaction: discord.Interaction):
         """Manually trigger today's morning trading prep reminder."""
-        await ctx.send("🎲 Shuffling your history...")
+        await interaction.response.send_message("🎲 Shuffling your history...")
         await self.daily_reminder()
 
 async def setup(bot):

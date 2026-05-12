@@ -77,23 +77,24 @@ class TestTradesCog:
         return Trades(bot)
 
     @pytest.fixture
-    def ctx(self):
-        ctx = AsyncMock()
-        ctx.guild = MagicMock()
-        ctx.send = AsyncMock()
-        return ctx
+    def interaction(self):
+        interaction = AsyncMock()
+        interaction.guild = MagicMock()
+        interaction.response = AsyncMock()
+        interaction.followup = AsyncMock()
+        return interaction
 
     # --- sync_fractals ---
 
     @pytest.mark.asyncio
-    async def test_sync_fractals_no_category(self, trades_cog, ctx):
-        ctx.guild.categories = []
-        await trades_cog.sync_fractals.callback(trades_cog, ctx)
-        ctx.send.assert_called_once()
-        assert "Couldn't find category" in ctx.send.call_args[0][0]
+    async def test_sync_fractals_no_category(self, trades_cog, interaction):
+        interaction.guild.categories = []
+        await trades_cog.sync_fractals.callback(trades_cog, interaction)
+        interaction.followup.send.assert_called_once()
+        assert "Couldn't find category" in interaction.followup.send.call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_sync_fractals_with_category(self, trades_cog, ctx, tmp_path):
+    async def test_sync_fractals_with_category(self, trades_cog, interaction, tmp_path):
         mock_attachment = AsyncMock()
         mock_attachment.filename = "chart.png"
         mock_attachment.save = AsyncMock()
@@ -116,25 +117,25 @@ class TestTradesCog:
         mock_category = MagicMock()
         mock_category.name = "Fractal_Trades"
         mock_category.text_channels = [mock_channel]
-        ctx.guild.categories = [mock_category]
+        interaction.guild.categories = [mock_category]
 
         with patch("cogs.trades.TRADES_DIR", tmp_path):
-            await trades_cog.sync_fractals.callback(trades_cog, ctx)
+            await trades_cog.sync_fractals.callback(trades_cog, interaction)
 
-        assert ctx.send.call_count >= 2
-        assert "Sync complete" in ctx.send.call_args_list[-1][0][0]
+        assert interaction.followup.send.call_count >= 2
+        assert "Sync complete" in interaction.followup.send.call_args_list[-1][0][0]
 
     # --- analyze_trades ---
 
     @pytest.mark.asyncio
-    async def test_analyze_trades_no_directory(self, trades_cog, ctx):
+    async def test_analyze_trades_no_directory(self, trades_cog, interaction):
         with patch("cogs.trades.TRADES_DIR", Path("/nonexistent/path")):
-            await trades_cog.analyze_trades.callback(trades_cog, ctx)
-        ctx.send.assert_called_once()
-        assert "No trades directory found" in ctx.send.call_args[0][0]
+            await trades_cog.analyze_trades.callback(trades_cog, interaction)
+        interaction.followup.send.assert_called_once()
+        assert "No trades directory found" in interaction.followup.send.call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_analyze_trades_up_to_date(self, trades_cog, ctx, tmp_path):
+    async def test_analyze_trades_up_to_date(self, trades_cog, interaction, tmp_path):
         trades_dir = tmp_path / "trades"
         trades_dir.mkdir()
         channel_dir = trades_dir / "channel1"
@@ -150,12 +151,12 @@ class TestTradesCog:
         with patch("cogs.trades.TRADES_DIR", trades_dir), \
              patch("cogs.trades.TRACKER_PATH", tracker), \
              patch("cogs.trades.FAILED_TRADES_PATH", failed_path):
-            await trades_cog.analyze_trades.callback(trades_cog, ctx)
+            await trades_cog.analyze_trades.callback(trades_cog, interaction)
 
-        assert any("up to date" in str(c).lower() for c in ctx.send.call_args_list)
+        assert any("up to date" in str(c).lower() for c in interaction.followup.send.call_args_list)
 
     @pytest.mark.asyncio
-    async def test_analyze_trades_finds_new_trades(self, trades_cog, ctx, tmp_path):
+    async def test_analyze_trades_finds_new_trades(self, trades_cog, interaction, tmp_path):
         trades_dir = tmp_path / "trades"
         trades_dir.mkdir()
         channel_dir = trades_dir / "channel1"
@@ -172,10 +173,10 @@ class TestTradesCog:
              patch("cogs.trades.TRACKER_PATH", tracker), \
              patch("cogs.trades.FAILED_TRADES_PATH", failed_path), \
              patch.object(trades_cog.bot.loop, "create_task"):
-            await trades_cog.analyze_trades.callback(trades_cog, ctx)
+            await trades_cog.analyze_trades.callback(trades_cog, interaction)
 
         assert any("1" in str(c) and "trade" in str(c).lower()
-                    for c in ctx.send.call_args_list)
+                    for c in interaction.followup.send.call_args_list)
 
 
 # ──────────────────────────────────────────────
@@ -189,14 +190,14 @@ class TestRunAnalysisLoop:
         return Trades(MagicMock())
 
     @pytest.fixture
-    def ctx(self):
-        ctx = AsyncMock()
+    def interaction(self):
+        interaction = AsyncMock()
         status_msg = AsyncMock()
-        ctx.send = AsyncMock(return_value=status_msg)
-        return ctx
+        interaction.followup.send = AsyncMock(return_value=status_msg)
+        return interaction
 
     @pytest.mark.asyncio
-    async def test_successful_analysis(self, trades_cog, ctx, tmp_path):
+    async def test_successful_analysis(self, trades_cog, interaction, tmp_path):
         tracker = tmp_path / "tracker.txt"
         tracker.write_text("0")
         insights = tmp_path / "insights.json"
@@ -230,7 +231,7 @@ class TestRunAnalysisLoop:
             ))
             mock_cls.return_value = mock_session
 
-            await trades_cog.run_analysis_loop(ctx, trades, 0)
+            await trades_cog.run_analysis_loop(interaction, trades, 0)
 
         assert insights.exists()
         data = json.loads(insights.read_text())
@@ -238,7 +239,7 @@ class TestRunAnalysisLoop:
         assert tracker.read_text() == "100"
 
     @pytest.mark.asyncio
-    async def test_api_failure_uses_fallback(self, trades_cog, ctx, tmp_path):
+    async def test_api_failure_uses_fallback(self, trades_cog, interaction, tmp_path):
         tracker = tmp_path / "tracker.txt"
         tracker.write_text("0")
         insights = tmp_path / "insights.json"
@@ -269,11 +270,11 @@ class TestRunAnalysisLoop:
             ))
             mock_cls.return_value = mock_session
 
-            await trades_cog.run_analysis_loop(ctx, trades, 0)
+            await trades_cog.run_analysis_loop(interaction, trades, 0)
 
         assert insights.exists()
         assert tracker.read_text() == "100"
-        embed_call = ctx.send.call_args_list[-1]
+        embed_call = interaction.followup.send.call_args_list[-1]
         embed = embed_call.kwargs.get("embed") or embed_call[1].get("embed")
         assert embed is not None
 
@@ -340,7 +341,8 @@ class TestAutoSync:
     async def test_schedules_sync_on_fractal_message(self, trades_cog):
         """A message in Fractal_Trades schedules a delayed sync task."""
         msg = self._make_message()
-        await trades_cog.on_message(msg)
+        with patch.object(trades_cog, "_delayed_sync"):
+            await trades_cog.on_message(msg)
         trades_cog.bot.loop.create_task.assert_called_once()
         assert msg.guild.id in trades_cog._pending_sync
 
@@ -348,33 +350,35 @@ class TestAutoSync:
     async def test_debounce_cancels_previous_task(self, trades_cog):
         """A second message cancels the first timer and starts a new one."""
         msg1 = self._make_message(guild_id=1)
-        await trades_cog.on_message(msg1)
+        with patch.object(trades_cog, "_delayed_sync"):
+            await trades_cog.on_message(msg1)
 
         first_task = trades_cog._pending_sync[1]
 
         msg2 = self._make_message(guild_id=1)
-        await trades_cog.on_message(msg2)
+        with patch.object(trades_cog, "_delayed_sync"):
+            await trades_cog.on_message(msg2)
 
         first_task.cancel.assert_called_once()
         assert trades_cog.bot.loop.create_task.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_make_auto_ctx(self, trades_cog):
-        """_make_auto_ctx creates a context with guild, channel, and send."""
+    async def test_make_auto_interaction(self, trades_cog):
+        """_make_auto_interaction creates an interaction with guild and followup."""
         channel = MagicMock()
         channel.guild = MagicMock()
         channel.guild.text_channels = []  # Ensure no 'general' channel is found
         channel.send = AsyncMock()
 
-        ctx = await trades_cog._make_auto_ctx(channel)
+        interaction = await trades_cog._make_auto_interaction(channel)
 
-        assert ctx.guild == channel.guild
-        assert ctx.channel == channel
-        assert ctx.send == channel.send
+        assert interaction.guild == channel.guild
+        await interaction.followup.send("test")
+        channel.send.assert_called_once_with("test")
 
     @pytest.mark.asyncio
-    async def test_make_auto_ctx_with_general(self, trades_cog):
-        """_make_auto_ctx redirects to 'general' channel if it exists."""
+    async def test_make_auto_interaction_with_general(self, trades_cog):
+        """_make_auto_interaction redirects to 'general' channel if it exists."""
         channel = MagicMock()
         channel.guild = MagicMock()
         
@@ -384,11 +388,11 @@ class TestAutoSync:
         
         channel.guild.text_channels = [general_channel]
 
-        ctx = await trades_cog._make_auto_ctx(channel)
+        interaction = await trades_cog._make_auto_interaction(channel)
 
-        assert ctx.guild == channel.guild
-        assert ctx.channel == general_channel
-        assert ctx.send == general_channel.send
+        assert interaction.guild == channel.guild
+        await interaction.followup.send("test")
+        general_channel.send.assert_called_once_with("test")
 
     @pytest.mark.asyncio
     async def test_delayed_sync_cancelled(self, trades_cog):

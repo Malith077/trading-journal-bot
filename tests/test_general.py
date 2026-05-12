@@ -19,65 +19,41 @@ class TestGeneralCog:
         return General(bot)
 
     @pytest.fixture
-    def ctx(self):
-        ctx = AsyncMock()
-        ctx.guild = MagicMock()
-        return ctx
+    def interaction(self):
+        interaction = AsyncMock()
+        interaction.guild = MagicMock()
+        return interaction
 
     @pytest.mark.asyncio
-    async def test_ping(self, cog, ctx):
-        await cog.ping.callback(cog, ctx)
-        ctx.send.assert_called_once_with("Pong! 🏓")
+    async def test_ping(self, cog, interaction):
+        await cog.ping.callback(cog, interaction)
+        interaction.response.send_message.assert_called_once_with("Pong! 🏓")
 
     @pytest.mark.asyncio
-    async def test_list_channels(self, cog, ctx):
+    async def test_list_channels(self, cog, interaction):
         ch1, ch2 = MagicMock(), MagicMock()
         ch1.name, ch2.name = "general", "trades"
-        ctx.guild.text_channels = [ch1, ch2]
-        await cog.list_channels.callback(cog, ctx)
-        assert "2" in ctx.send.call_args[0][0]
+        interaction.guild.text_channels = [ch1, ch2]
+        await cog.list_channels.callback(cog, interaction)
+        assert "2" in interaction.response.send_message.call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_list_channels_empty(self, cog, ctx):
-        ctx.guild.text_channels = []
-        await cog.list_channels.callback(cog, ctx)
-        assert "0" in ctx.send.call_args[0][0]
+    async def test_list_channels_empty(self, cog, interaction):
+        interaction.guild.text_channels = []
+        await cog.list_channels.callback(cog, interaction)
+        assert "0" in interaction.response.send_message.call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_help_builds_embed(self, cog, ctx):
-        cmd = MagicMock(name="test", help="A test.", hidden=False)
+    async def test_help_builds_embed(self, cog, interaction):
+        cmd = MagicMock()
         cmd.name = "test"
-        mock_cog = MagicMock()
-        mock_cog.get_commands.return_value = [cmd]
-        cog.bot.cogs = {"TestCog": mock_cog}
-        await cog.custom_help.callback(cog, ctx)
-        embed = ctx.send.call_args.kwargs.get("embed") or ctx.send.call_args[1].get("embed")
+        cmd.description = "A test."
+        cog.bot.tree.walk_commands.return_value = [cmd]
+        
+        await cog.custom_help.callback(cog, interaction)
+        embed = interaction.response.send_message.call_args.kwargs.get("embed")
         assert embed.title == "📖 Command Reference"
-
-    @pytest.mark.asyncio
-    async def test_help_skips_hidden(self, cog, ctx):
-        vis = MagicMock(name="vis", help="Visible.", hidden=False)
-        vis.name = "vis"
-        hid = MagicMock(name="hid", help="Hidden.", hidden=True)
-        hid.name = "hid"
-        mock_cog = MagicMock()
-        mock_cog.get_commands.return_value = [vis, hid]
-        cog.bot.cogs = {"C": mock_cog}
-        await cog.custom_help.callback(cog, ctx)
-        embed = ctx.send.call_args.kwargs.get("embed") or ctx.send.call_args[1].get("embed")
-        assert "vis" in embed.fields[0].value
-        assert "hid" not in embed.fields[0].value
-
-    @pytest.mark.asyncio
-    async def test_help_no_docstring(self, cog, ctx):
-        cmd = MagicMock(name="x", help=None, hidden=False)
-        cmd.name = "x"
-        mock_cog = MagicMock()
-        mock_cog.get_commands.return_value = [cmd]
-        cog.bot.cogs = {"C": mock_cog}
-        await cog.custom_help.callback(cog, ctx)
-        embed = ctx.send.call_args.kwargs.get("embed") or ctx.send.call_args[1].get("embed")
-        assert "No description" in embed.fields[0].value
+        assert "A test." in embed.fields[0].value
 
     def test_removes_default_help(self, bot):
         General(bot)
