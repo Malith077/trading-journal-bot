@@ -178,6 +178,65 @@ class TestTradesCog:
         assert any("1" in str(c) and "trade" in str(c).lower()
                     for c in interaction.followup.send.call_args_list)
 
+    # --- new_trade ---
+
+    @pytest.mark.asyncio
+    async def test_new_trade_calculates_correct_number(self, trades_cog, interaction):
+        mock_category = MagicMock()
+        mock_category.name = "Fractal_Trades"
+        mock_category.create_text_channel = AsyncMock()
+        
+        channel1 = MagicMock()
+        channel1.name = "trade_4_gc"
+        channel2 = MagicMock()
+        channel2.name = "trade_50_es"
+        channel3 = MagicMock()
+        channel3.name = "general"
+        
+        mock_category.text_channels = [channel1, channel2, channel3]
+        interaction.guild.categories = [mock_category]
+        
+        await trades_cog.new_trade.callback(trades_cog, interaction, asset="NQ")
+        
+        mock_category.create_text_channel.assert_called_once_with(name="trade_51_nq")
+        interaction.followup.send.assert_called_once()
+        assert "✅ Successfully created" in interaction.followup.send.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_new_trade_empty_category(self, trades_cog, interaction):
+        mock_category = MagicMock()
+        mock_category.name = "Fractal_Trades"
+        mock_category.create_text_channel = AsyncMock()
+        mock_category.text_channels = []
+        interaction.guild.categories = [mock_category]
+        
+        await trades_cog.new_trade.callback(trades_cog, interaction, asset="GC")
+        
+        mock_category.create_text_channel.assert_called_once_with(name="trade_1_gc")
+        interaction.followup.send.assert_called_once()
+        assert "✅ Successfully created" in interaction.followup.send.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_new_trade_missing_category(self, trades_cog, interaction):
+        interaction.guild.categories = []
+        
+        await trades_cog.new_trade.callback(trades_cog, interaction, asset="GC")
+        
+        interaction.followup.send.assert_called_once()
+        assert "❌ Couldn't find category" in interaction.followup.send.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_nt_alias_calls_same_logic(self, trades_cog, interaction):
+        mock_category = MagicMock()
+        mock_category.name = "Fractal_Trades"
+        mock_category.create_text_channel = AsyncMock()
+        mock_category.text_channels = []
+        interaction.guild.categories = [mock_category]
+        
+        await trades_cog.nt.callback(trades_cog, interaction, asset="Gold")
+        
+        mock_category.create_text_channel.assert_called_once_with(name="trade_1_gold")
+
 
 # ──────────────────────────────────────────────
 # run_analysis_loop tests
