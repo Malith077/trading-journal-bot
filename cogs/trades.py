@@ -503,6 +503,45 @@ Respond STRICTLY in valid JSON format with no extra text:
 
         await interaction.followup.send(embed=embed)
 
+    async def _do_new_trade(self, interaction: discord.Interaction, asset: str):
+        await interaction.response.defer()
+        
+        category = discord.utils.get(interaction.guild.categories, name=CATEGORY_NAME)
+        if not category:
+            await interaction.followup.send(f"❌ Couldn't find category '{CATEGORY_NAME}'. Please create it first.")
+            return
+            
+        max_num = 0
+        pattern = re.compile(r"^trade_(\d+)_")
+        for channel in category.text_channels:
+            match = pattern.match(channel.name)
+            if match:
+                num = int(match.group(1))
+                if num > max_num:
+                    max_num = num
+                    
+        new_num = max_num + 1
+        safe_asset = asset.lower().replace(" ", "_").replace("-", "_")
+        new_channel_name = f"trade_{new_num}_{safe_asset}"
+        
+        try:
+            new_channel = await category.create_text_channel(name=new_channel_name)
+            await interaction.followup.send(f"✅ Successfully created new trade channel: {new_channel.mention}")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to create channels in that category.")
+        except discord.HTTPException as e:
+            await interaction.followup.send(f"❌ Failed to create channel: {e}")
+
+    @app_commands.command(name="new_trade", description="Creates a new numbered trade channel")
+    @app_commands.describe(asset="The asset being traded (e.g. gc, es)")
+    async def new_trade(self, interaction: discord.Interaction, asset: str):
+        await self._do_new_trade(interaction, asset)
+
+    @app_commands.command(name="nt", description="Alias for /new_trade")
+    @app_commands.describe(asset="The asset being traded (e.g. gc, es)")
+    async def nt(self, interaction: discord.Interaction, asset: str):
+        await self._do_new_trade(interaction, asset)
+
 
 async def setup(bot):
     await bot.add_cog(Trades(bot))
