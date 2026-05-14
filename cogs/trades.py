@@ -135,14 +135,23 @@ class Trades(commands.Cog):
         # Auto-sync debounce: guild_id → asyncio.Task
         self._pending_sync: dict[int, asyncio.Task] = {}
 
+    # --- Multi-Category Helper ---
+
+    @staticmethod
+    def _get_trade_categories(guild: discord.Guild) -> list:
+        """Return all categories whose names start with 'Fractal_Trades', sorted by name."""
+        cats = [c for c in guild.categories if c.name.startswith("Fractal_Trades")]
+        cats.sort(key=lambda c: c.name)
+        return cats
+
     # --- Channel Creation Listener ---
 
     @commands.Cog.listener()
     async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
-        """Post reflection prompt when a new channel is created under Fractal_Trades."""
+        """Post reflection prompt when a new channel is created under any Fractal_Trades category."""
         if not isinstance(channel, discord.TextChannel):
             return
-        if not channel.category or channel.category.name != CATEGORY_NAME:
+        if not channel.category or not channel.category.name.startswith("Fractal_Trades"):
             return
 
         embed = discord.Embed(
@@ -180,7 +189,7 @@ class Trades(commands.Cog):
         channel = message.channel
         if not hasattr(channel, "category") or not channel.category:
             return
-        if channel.category.name != CATEGORY_NAME:
+        if not channel.category.name.startswith("Fractal_Trades"):
             return
 
         guild_id = message.guild.id
@@ -260,47 +269,47 @@ class Trades(commands.Cog):
         await self._do_sync_fractals(interaction.guild, interaction.followup.send)
 
     async def _do_sync_fractals(self, guild: discord.Guild, send_func):
-        target_category_name = "Fractal_Trades"
-        category = discord.utils.get(guild.categories, name=target_category_name)
+        categories = self._get_trade_categories(guild)
 
-        if not category:
-            await send_func(f"❌ Couldn't find category `{target_category_name}`.")
+        if not categories:
+            await send_func(f"❌ Couldn't find category `{CATEGORY_NAME}`.")
             return
 
-        await send_func(f"📥 Starting full JSON and Image sync for **{target_category_name}**...")
+        await send_func(f"📥 Starting full JSON and Image sync across **{len(categories)}** Fractal_Trades category/categories...")
 
         total_images = 0
-        for channel in category.text_channels:
-            channel_path = TRADES_DIR / channel.name
-            channel_path.mkdir(parents=True, exist_ok=True)
-            channel_data = []
+        for category in categories:
+            for channel in category.text_channels:
+                channel_path = TRADES_DIR / channel.name
+                channel_path.mkdir(parents=True, exist_ok=True)
+                channel_data = []
 
-            async for message in channel.history(limit=None, oldest_first=True):
-                if message.content or message.attachments:
-                    msg_entry = {
-                        "message_id": str(message.id),
-                        "timestamp": message.created_at.isoformat(),
-                        "author": message.author.name,
-                        "content": message.content,
-                        "images": []
-                    }
+                async for message in channel.history(limit=None, oldest_first=True):
+                    if message.content or message.attachments:
+                        msg_entry = {
+                            "message_id": str(message.id),
+                            "timestamp": message.created_at.isoformat(),
+                            "author": message.author.name,
+                            "content": message.content,
+                            "images": []
+                        }
 
-                    if message.attachments:
-                        for attachment in message.attachments:
-                            if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
-                                unique_filename = f"{message.id}_{attachment.filename}"
-                                file_path = channel_path / unique_filename
+                        if message.attachments:
+                            for attachment in message.attachments:
+                                if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+                                    unique_filename = f"{message.id}_{attachment.filename}"
+                                    file_path = channel_path / unique_filename
 
-                                if not file_path.exists():
-                                    await attachment.save(file_path)
-                                    total_images += 1
+                                    if not file_path.exists():
+                                        await attachment.save(file_path)
+                                        total_images += 1
 
-                                msg_entry["images"].append(unique_filename)
+                                    msg_entry["images"].append(unique_filename)
 
-                    channel_data.append(msg_entry)
+                        channel_data.append(msg_entry)
 
-            async with aiofiles.open(channel_path / "history.json", "w", encoding="utf-8") as f:
-                await f.write(json.dumps(channel_data, indent=4))
+                async with aiofiles.open(channel_path / "history.json", "w", encoding="utf-8") as f:
+                    await f.write(json.dumps(channel_data, indent=4))
 
         await send_func(f"✅ Sync complete! Downloaded **{total_images}** new images and updated all `history.json` files.")
 
@@ -505,27 +514,45 @@ Respond STRICTLY in valid JSON format with no extra text:
 
     async def _do_new_trade(self, interaction: discord.Interaction, asset: str):
         await interaction.response.defer()
-        
-        category = discord.utils.get(interaction.guild.categories, name=CATEGORY_NAME)
-        if not category:
+
+        categories = self._get_trade_categories(interaction.guild)
+        if not categories:
             await interaction.followup.send(f"❌ Couldn't find category '{CATEGORY_NAME}'. Please create it first.")
             return
-            
+
+        # Find the highest trade number across ALL Fractal_Trades categories
         max_num = 0
         pattern = re.compile(r"^trade_(\d+)_")
-        for channel in category.text_channels:
-            match = pattern.match(channel.name)
-            if match:
-                num = int(match.group(1))
-                if num > max_num:
-                    max_num = num
-                    
+        for cat in categories:
+            for channel in cat.text_channels:
+                match = pattern.match(channel.name)
+                if match:
+                    num = int(match.group(1))
+                    if num > max_num:
+                        max_num = num
+
         new_num = max_num + 1
         safe_asset = asset.lower().replace(" ", "_").replace("-", "_")
         new_channel_name = f"trade_{new_num}_{safe_asset}"
-        
+
+        # If the latest category is full (50 channels), create the next one
+        latest_category = categories[-1]
+        if len(latest_category.text_channels) >= 50:
+            last_name = latest_category.name  # e.g. "Fractal_Trades" or "Fractal_Trades2"
+            suffix = last_name[len("Fractal_Trades"):]  # "" → 2, "2" → 3, etc.
+            next_num = int(suffix) + 1 if suffix else 2
+            new_cat_name = f"Fractal_Trades{next_num}"
+            try:
+                latest_category = await interaction.guild.create_category(new_cat_name)
+            except discord.Forbidden:
+                await interaction.followup.send("❌ I don't have permission to create a new category.")
+                return
+            except discord.HTTPException as e:
+                await interaction.followup.send(f"❌ Failed to create category: {e}")
+                return
+
         try:
-            new_channel = await category.create_text_channel(name=new_channel_name)
+            new_channel = await latest_category.create_text_channel(name=new_channel_name)
             await interaction.followup.send(f"✅ Successfully created new trade channel: {new_channel.mention}")
         except discord.Forbidden:
             await interaction.followup.send("❌ I don't have permission to create channels in that category.")
