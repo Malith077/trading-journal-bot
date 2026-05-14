@@ -182,23 +182,30 @@ class TestTradesCog:
 
     @pytest.mark.asyncio
     async def test_new_trade_calculates_correct_number(self, trades_cog, interaction):
-        mock_category = MagicMock()
-        mock_category.name = "Fractal_Trades"
-        mock_category.create_text_channel = AsyncMock()
-        
-        channel1 = MagicMock()
-        channel1.name = "trade_4_gc"
-        channel2 = MagicMock()
-        channel2.name = "trade_50_es"
-        channel3 = MagicMock()
-        channel3.name = "general"
-        
-        mock_category.text_channels = [channel1, channel2, channel3]
-        interaction.guild.categories = [mock_category]
-        
+        mock_category1 = MagicMock()
+        mock_category1.name = "Fractal_Trades"
+
+        ch1 = MagicMock()
+        ch1.name = "trade_4_gc"
+        ch2 = MagicMock()
+        ch2.name = "trade_50_es"
+        mock_category1.text_channels = [ch1, ch2]
+
+        mock_category2 = MagicMock()
+        mock_category2.name = "Fractal_Trades2"
+        mock_category2.create_text_channel = AsyncMock()
+
+        ch3 = MagicMock()
+        ch3.name = "trade_75_nq"
+        mock_category2.text_channels = [ch3]
+
+        interaction.guild.categories = [mock_category1, mock_category2]
+
         await trades_cog.new_trade.callback(trades_cog, interaction, asset="NQ")
-        
-        mock_category.create_text_channel.assert_called_once_with(name="trade_51_nq")
+
+        # Max across both categories is 75, so next is 76.
+        # Latest category (Fractal_Trades2) has 1 channel — not full.
+        mock_category2.create_text_channel.assert_called_once_with(name="trade_76_nq")
         interaction.followup.send.assert_called_once()
         assert "✅ Successfully created" in interaction.followup.send.call_args[0][0]
 
@@ -214,6 +221,35 @@ class TestTradesCog:
         
         mock_category.create_text_channel.assert_called_once_with(name="trade_1_gc")
         interaction.followup.send.assert_called_once()
+        assert "✅ Successfully created" in interaction.followup.send.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_new_trade_creates_new_category_when_full(self, trades_cog, interaction):
+        """When the latest category has 50 channels, a new Fractal_Trades2 is auto-created."""
+        mock_category = MagicMock()
+        mock_category.name = "Fractal_Trades"
+
+        # Build 50 mock channels
+        full_channels = []
+        for i in range(1, 51):
+            ch = MagicMock()
+            ch.name = f"trade_{i}_gc"
+            full_channels.append(ch)
+        mock_category.text_channels = full_channels
+
+        new_category = MagicMock()
+        new_category.name = "Fractal_Trades2"
+        new_category.create_text_channel = AsyncMock()
+        interaction.guild.create_category = AsyncMock(return_value=new_category)
+
+        interaction.guild.categories = [mock_category]
+
+        await trades_cog.new_trade.callback(trades_cog, interaction, asset="ES")
+
+        # A new category should have been created
+        interaction.guild.create_category.assert_called_once_with("Fractal_Trades2")
+        # New channel should land in Fractal_Trades2
+        new_category.create_text_channel.assert_called_once_with(name="trade_51_es")
         assert "✅ Successfully created" in interaction.followup.send.call_args[0][0]
 
     @pytest.mark.asyncio
@@ -406,6 +442,15 @@ class TestAutoSync:
         assert msg.guild.id in trades_cog._pending_sync
 
     @pytest.mark.asyncio
+    async def test_schedules_sync_on_fractal_trades_2(self, trades_cog):
+        """A message in Fractal_Trades2 also schedules a delayed sync task."""
+        msg = self._make_message(category_name="Fractal_Trades2")
+        with patch.object(trades_cog, "_delayed_sync"):
+            await trades_cog.on_message(msg)
+        trades_cog.bot.loop.create_task.assert_called_once()
+        assert msg.guild.id in trades_cog._pending_sync
+
+    @pytest.mark.asyncio
     async def test_debounce_cancels_previous_task(self, trades_cog):
         """A second message cancels the first timer and starts a new one."""
         msg1 = self._make_message(guild_id=1)
@@ -498,6 +543,22 @@ class TestReflections:
         assert embed is not None
         assert "New Trade Channel" in embed.title
         assert view is not None
+
+    @pytest.mark.asyncio
+    async def test_channel_create_triggers_for_fractal_trades_2(self, trades_cog):
+        """New channel under Fractal_Trades2 also gets a reflection button message."""
+        channel = AsyncMock(spec=discord.TextChannel)
+        channel.name = "trade_51_es"
+        channel.category = MagicMock()
+        channel.category.name = "Fractal_Trades2"
+
+        await trades_cog.on_guild_channel_create(channel)
+
+        channel.send.assert_called_once()
+        call_kwargs = channel.send.call_args
+        embed = call_kwargs.kwargs.get("embed") or call_kwargs[1].get("embed")
+        assert embed is not None
+        assert "New Trade Channel" in embed.title
 
     @pytest.mark.asyncio
     async def test_channel_create_ignores_other_categories(self, trades_cog):
