@@ -17,7 +17,8 @@ from config import (
     TRADES_DIR,
     INSIGHTS_PATH,
     TRACKER_PATH,
-    CATEGORY_NAME
+    CATEGORY_NAME,
+    CHECKLIST_PATH
 )
 
 FAILED_TRADES_PATH = Path.cwd() / "failed_trades.json"
@@ -129,6 +130,116 @@ class ReflectionView(ui.View):
         await interaction.response.send_modal(modal)
 
 
+def _load_checklist_items() -> list[str]:
+    """Load checklist items from the JSON config file."""
+    try:
+        with open(CHECKLIST_PATH, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if isinstance(items, list) and items:
+            return [str(item) for item in items]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def _build_checklist_embed(items: list[str], states: list[bool]) -> discord.Embed:
+    """Build a checklist embed with progress tracking."""
+    completed = sum(states)
+    total = len(items)
+    progress_pct = int((completed / total) * 100) if total > 0 else 0
+
+    # Build progress bar
+    filled = int(progress_pct / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+
+    if completed == total:
+        color = discord.Color.green()
+        status = "✅ All checks passed!"
+    elif completed > 0:
+        color = discord.Color.gold()
+        status = f"{bar}  {completed}/{total}"
+    else:
+        color = discord.Color.light_grey()
+        status = f"{bar}  {completed}/{total}"
+
+    embed = discord.Embed(
+        title="📋 Trade Entry Checklist",
+        description="Toggle each item as you verify it. All checks should pass before entering.",
+        color=color
+    )
+
+    checklist_lines = []
+    for i, item in enumerate(items):
+        icon = "✅" if states[i] else "⬜"
+        checklist_lines.append(f"{icon}  {item}")
+
+    embed.add_field(name="Checklist", value="\n".join(checklist_lines), inline=False)
+    embed.add_field(name="Progress", value=status, inline=False)
+    return embed
+
+
+class ChecklistView(ui.View):
+    """Persistent view with toggle buttons for each checklist item."""
+
+    def __init__(self, items: list[str] | None = None):
+        super().__init__(timeout=None)  # Never expires
+        if items is None:
+            items = _load_checklist_items()
+        self.items = items
+        # Dynamically add a button for each item
+        for i, item in enumerate(items):
+            button = ui.Button(
+                label=f"{i+1}. {item[:70]}",  # Discord button label max ~80 chars
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"checklist_{i}",
+            )
+            button.callback = self._make_callback(i)
+            self.add_item(button)
+
+    def _make_callback(self, index: int):
+        """Create a callback closure for a specific checklist item index."""
+        async def callback(interaction: discord.Interaction):
+            channel_name = interaction.channel.name
+            channel_dir = TRADES_DIR / channel_name
+            channel_dir.mkdir(parents=True, exist_ok=True)
+            state_path = channel_dir / "checklist_state.json"
+
+            # Load current state
+            try:
+                async with aiofiles.open(state_path, "r", encoding="utf-8") as f:
+                    content = await f.read()
+                    states = json.loads(content)
+            except (FileNotFoundError, json.JSONDecodeError):
+                states = [False] * len(self.items)
+
+            # Ensure states list matches items length
+            while len(states) < len(self.items):
+                states.append(False)
+
+            # Toggle the clicked item
+            states[index] = not states[index]
+
+            # Save state
+            async with aiofiles.open(state_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(states))
+
+            # Update the embed in-place
+            embed = _build_checklist_embed(self.items, states)
+
+            # Update button styles to reflect state
+            for i, child in enumerate(self.children):
+                if isinstance(child, ui.Button) and child.custom_id and child.custom_id.startswith("checklist_"):
+                    btn_idx = int(child.custom_id.split("_")[1])
+                    if btn_idx < len(states) and states[btn_idx]:
+                        child.style = discord.ButtonStyle.success
+                    else:
+                        child.style = discord.ButtonStyle.secondary
+
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        return callback
+
+
 class Trades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -148,12 +259,28 @@ class Trades(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
-        """Post reflection prompt when a new channel is created under any Fractal_Trades category."""
+        """Post checklist and reflection prompt when a new channel is created under any Fractal_Trades category."""
         if not isinstance(channel, discord.TextChannel):
             return
         if not channel.category or not channel.category.name.startswith("Fractal_Trades"):
             return
 
+        # --- Checklist ---
+        items = _load_checklist_items()
+        if items:
+            states = [False] * len(items)
+            checklist_embed = _build_checklist_embed(items, states)
+            checklist_view = ChecklistView(items)
+            await channel.send(embed=checklist_embed, view=checklist_view)
+
+            # Save initial state to disk
+            channel_dir = TRADES_DIR / channel.name
+            channel_dir.mkdir(parents=True, exist_ok=True)
+            state_path = channel_dir / "checklist_state.json"
+            async with aiofiles.open(state_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(states))
+
+        # --- Reflection Prompt ---
         embed = discord.Embed(
             title="🆕 New Trade Channel",
             description=(
@@ -573,3 +700,7 @@ Respond STRICTLY in valid JSON format with no extra text:
 async def setup(bot):
     await bot.add_cog(Trades(bot))
     bot.add_view(ReflectionView())
+    # Register persistent checklist view (items loaded from config)
+    items = _load_checklist_items()
+    if items:
+        bot.add_view(ChecklistView(items))

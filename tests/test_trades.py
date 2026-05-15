@@ -14,7 +14,10 @@ import discord
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 
-from cogs.trades import extract_json, Trades, ReflectionModal, MAX_RETRIES
+from cogs.trades import (
+    extract_json, Trades, ReflectionModal, ChecklistView,
+    _load_checklist_items, _build_checklist_embed, MAX_RETRIES
+)
 
 
 # ──────────────────────────────────────────────
@@ -536,8 +539,8 @@ class TestReflections:
 
         await trades_cog.on_guild_channel_create(channel)
 
-        channel.send.assert_called_once()
-        call_kwargs = channel.send.call_args
+        # Last call should be the reflection prompt (checklist may be sent first)
+        call_kwargs = channel.send.call_args_list[-1]
         embed = call_kwargs.kwargs.get("embed") or call_kwargs[1].get("embed")
         view = call_kwargs.kwargs.get("view") or call_kwargs[1].get("view")
         assert embed is not None
@@ -554,8 +557,8 @@ class TestReflections:
 
         await trades_cog.on_guild_channel_create(channel)
 
-        channel.send.assert_called_once()
-        call_kwargs = channel.send.call_args
+        # Last call should be the reflection prompt
+        call_kwargs = channel.send.call_args_list[-1]
         embed = call_kwargs.kwargs.get("embed") or call_kwargs[1].get("embed")
         assert embed is not None
         assert "New Trade Channel" in embed.title
@@ -642,3 +645,139 @@ class TestReflections:
         # Check embed was sent and pinned
         interaction.response.send_message.assert_called_once()
         response_msg.pin.assert_called_once()
+
+
+# ──────────────────────────────────────────────
+# Checklist feature tests
+# ──────────────────────────────────────────────
+
+class TestChecklist:
+    """Tests for the interactive trade entry checklist."""
+
+    @pytest.fixture
+    def trades_cog(self):
+        bot = MagicMock()
+        bot.loop = MagicMock()
+        return Trades(bot)
+
+    def test_load_checklist_items(self, tmp_path):
+        """Loads items from a valid JSON file."""
+        checklist = tmp_path / "checklist.json"
+        checklist.write_text(json.dumps(["Rule 1", "Rule 2", "Rule 3"]))
+
+        with patch("cogs.trades.CHECKLIST_PATH", checklist):
+            items = _load_checklist_items()
+
+        assert items == ["Rule 1", "Rule 2", "Rule 3"]
+
+    def test_load_checklist_missing_file(self, tmp_path):
+        """Returns empty list when file is missing."""
+        with patch("cogs.trades.CHECKLIST_PATH", tmp_path / "nonexistent.json"):
+            items = _load_checklist_items()
+
+        assert items == []
+
+    def test_load_checklist_corrupt_file(self, tmp_path):
+        """Returns empty list when file is corrupt."""
+        checklist = tmp_path / "checklist.json"
+        checklist.write_text("not valid json{{{")
+
+        with patch("cogs.trades.CHECKLIST_PATH", checklist):
+            items = _load_checklist_items()
+
+        assert items == []
+
+    def test_build_embed_all_unchecked(self):
+        """Embed shows all items unchecked with 0/3 progress."""
+        items = ["Rule 1", "Rule 2", "Rule 3"]
+        states = [False, False, False]
+        embed = _build_checklist_embed(items, states)
+
+        assert embed.title == "\U0001f4cb Trade Entry Checklist"
+        assert embed.color == discord.Color.light_grey()
+        checklist_field = embed.fields[0]
+        assert "\u2b1c  Rule 1" in checklist_field.value
+        assert "\u2b1c  Rule 2" in checklist_field.value
+        progress_field = embed.fields[1]
+        assert "0/3" in progress_field.value
+
+    def test_build_embed_partial(self):
+        """Embed shows mixed states and gold color."""
+        items = ["Rule 1", "Rule 2", "Rule 3"]
+        states = [True, False, True]
+        embed = _build_checklist_embed(items, states)
+
+        assert embed.color == discord.Color.gold()
+        checklist_field = embed.fields[0]
+        assert "\u2705  Rule 1" in checklist_field.value
+        assert "\u2b1c  Rule 2" in checklist_field.value
+        assert "\u2705  Rule 3" in checklist_field.value
+        progress_field = embed.fields[1]
+        assert "2/3" in progress_field.value
+
+    def test_build_embed_all_checked(self):
+        """Embed shows green with all-passed message."""
+        items = ["Rule 1", "Rule 2"]
+        states = [True, True]
+        embed = _build_checklist_embed(items, states)
+
+        assert embed.color == discord.Color.green()
+        progress_field = embed.fields[1]
+        assert "All checks passed" in progress_field.value
+
+    def test_checklist_view_creates_buttons(self):
+        """ChecklistView creates one button per item."""
+        items = ["Rule 1", "Rule 2", "Rule 3"]
+        view = ChecklistView(items)
+
+        buttons = [c for c in view.children if isinstance(c, discord.ui.Button)]
+        assert len(buttons) == 3
+        assert buttons[0].custom_id == "checklist_0"
+        assert buttons[1].custom_id == "checklist_1"
+        assert buttons[2].custom_id == "checklist_2"
+        assert "Rule 1" in buttons[0].label
+
+    @pytest.mark.asyncio
+    async def test_channel_create_posts_checklist(self, trades_cog):
+        """New channel under Fractal_Trades gets a checklist embed."""
+        channel = AsyncMock(spec=discord.TextChannel)
+        channel.name = "trade_51_es"
+        channel.category = MagicMock()
+        channel.category.name = "Fractal_Trades"
+
+        items = ["Rule 1", "Rule 2"]
+        with patch("cogs.trades._load_checklist_items", return_value=items), \
+             patch("cogs.trades.TRADES_DIR", Path("/tmp/test_trades")):
+            await trades_cog.on_guild_channel_create(channel)
+
+        # Should have been called twice: once for checklist, once for reflection
+        assert channel.send.call_count == 2
+
+        # First call is the checklist
+        first_call = channel.send.call_args_list[0]
+        checklist_embed = first_call.kwargs.get("embed") or first_call[1].get("embed")
+        assert checklist_embed is not None
+        assert "Checklist" in checklist_embed.title
+
+        # Second call is the reflection prompt
+        second_call = channel.send.call_args_list[1]
+        reflection_embed = second_call.kwargs.get("embed") or second_call[1].get("embed")
+        assert reflection_embed is not None
+        assert "New Trade Channel" in reflection_embed.title
+
+    @pytest.mark.asyncio
+    async def test_channel_create_no_checklist_when_empty(self, trades_cog):
+        """No checklist posted if config file is empty."""
+        channel = AsyncMock(spec=discord.TextChannel)
+        channel.name = "trade_51_es"
+        channel.category = MagicMock()
+        channel.category.name = "Fractal_Trades"
+
+        with patch("cogs.trades._load_checklist_items", return_value=[]):
+            await trades_cog.on_guild_channel_create(channel)
+
+        # Only the reflection prompt should be sent
+        assert channel.send.call_count == 1
+        call = channel.send.call_args_list[0]
+        embed = call.kwargs.get("embed") or call[1].get("embed")
+        assert "New Trade Channel" in embed.title
