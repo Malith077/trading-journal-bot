@@ -1,7 +1,10 @@
 [
-    "Confirmed daily bias direction",
-    "Identified key liquidity levels",
-    "Waited for C2 closure",
-    "Risk-to-reward ratio ≥ 2:1",
-    "No major news within 30 mins"
+    "Price should be within the average daily range",
+    "Is there a clear Daily C2, C3 candle closure in prior day",
+    "Check the structure in Asia and structure in London",
+    "Always check for Phases of price",
+    "Does it respect T-Spot (if not flip the bias with confirmation on hourly)",
+    "C2 or C3 in hourly - Additionallu check if this occurs on VWAP line",
+    "CISD within C2 or C3 candles (hourly)",
+    "Continuation Ob - has opposing run hit any liquidity? if so wait"
 ]
