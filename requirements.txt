@@ -5,3 +5,5 @@ chromadb>=0.4.15
 ollama
 pydantic-settings
 aiofiles==23.2.1
+pytest-asyncio
+pytest-aiohttp
