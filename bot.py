@@ -3,6 +3,8 @@ import discord
 import datetime
 from discord.ext import commands
 from config import BOT_TOKEN, HEALTH_CHANNEL_ID, HEALTH_CHANNEL_NAME
+from webhook_server import start_webhook_server
+from services.couchdb_service import couchdb_service
 
 class TradingAssistant(commands.Bot):
     def __init__(self):
@@ -10,6 +12,7 @@ class TradingAssistant(commands.Bot):
         intents.message_content = True
         intents.guilds = True
         super().__init__(command_prefix='!', intents=intents)
+        self._webhook_runner = None
 
     async def setup_hook(self):
         # Automatically load all cogs in the cogs/ folder
@@ -23,12 +26,25 @@ class TradingAssistant(commands.Bot):
         synced = await self.tree.sync()
         print(f"✅ All Cogs loaded successfully. Synced {len(synced)} command(s).")
 
+        # Start the webhook server for TradingView alerts
+        self._webhook_runner = await start_webhook_server(self)
+
+    async def close(self):
+        """Clean up services before shutting down."""
+        if self._webhook_runner:
+            await self._webhook_runner.cleanup()
+        await couchdb_service.close()
+        await super().close()
+
 bot = TradingAssistant()
 
 @bot.event
 async def on_ready():
     print(f'🚀 Logged in as {bot.user} | {datetime.datetime.now()}')
     
+    # Check Database connection
+    await couchdb_service.check_connection()
+
     target_channel = None
 
     # 1. Try to find the channel by ID first

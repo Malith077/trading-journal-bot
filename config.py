@@ -26,3 +26,14 @@ TRACKER_PATH = BASE_DIR / "last_analyzed.txt"
 CHROMA_DB_PATH = BASE_DIR / "chroma_db"
 RAG_COLLECTION_NAME = "trading_knowledge"
 CHECKLIST_PATH = BASE_DIR / "trade_checklist.json"
+# --- Webhook Config ---
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "")
+ALERTS_CHANNEL_NAME = "trading_alerts"
+COUCHDB_URL = os.getenv("COUCHDB_URL", "http://admin:password@127.0.0.1:5984")
+COUCHDB_DB_NAME = "trading_alerts"
+COUCHDB_BIAS_DB = "trading_bias"
+# --- Bias Config ---
+BIAS_CHANNEL_NAME = "trading_bias"
+BIAS_ASSETS = ["ES", "NQ", "YM", "RTY", "GC", "SI", "CL", "RB", "OH"]
+BIAS_RESET_TIME = datetime.time(hour=7, minute=0, tzinfo=ZoneInfo("Australia/Melbourne"))
