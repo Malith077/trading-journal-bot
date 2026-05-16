@@ -1,0 +1,1219 @@
+//@version=6
+
+indicator("C2/C3 + CISD + T-Spot", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+// ================================================================= //
+//                              INPUTS                               //
+// ================================================================= //
+
+GROUP_BIAS = "Market Bias"
+tradingBias = input.string("Both", "Trading Direction", options=["Both", "Bullish Only", "Bearish Only", "Auto (Daily)"], group=GROUP_BIAS)
+showBiasLabel = input.bool(true, "Show Auto Bias Label", group=GROUP_BIAS)
+showBarIndex = input.bool(false, "Show bar index", group=GROUP_BIAS)
+
+// --- C2/C3 SETTINGS ---
+GROUP_C2 = "C2/C3 Signal Settings"
+showC2Labels   = input.bool(false, "Show C2 Signals", group=GROUP_C2)
+showC3Labels   = input.bool(false, "Show C3 Signals", group=GROUP_C2)
+c2BullishColor = input.color(color.green, "Bullish Signal Color", group=GROUP_C2)
+c2BearishColor = input.color(color.red, "Bearish Signal Color", group=GROUP_C2)
+c2PivotLength  = input.int(1, "C2/C3 Pivot Length", minval=1, group=GROUP_C2)
+
+// --- CISD SETTINGS ---
+GROUP_CISD = "CISD Settings"
+cisdShowLabels       = input.bool(true, "Show 'CISD' Labels", group=GROUP_CISD)
+cisdShowExtraLabels  = input.bool(true, "Show runOpen/runClose Labels?", group=GROUP_CISD)
+cisdBullColor        = input.color(color.new(#089981, 0), "Bullish CISD Color", group=GROUP_CISD)
+cisdBearColor        = input.color(color.new(#f23645, 0), "Bearish CISD Color", group=GROUP_CISD)
+cisdTextSize         = str.lower(input.string('Tiny', 'Label Size', group=GROUP_CISD, options=['Tiny', 'Small', 'Normal']))
+usePrevCisdAsPOI     = input.bool(true, "Use Previous CISD as POI?", group=GROUP_CISD)
+keepLastCisds        = input.int(5, "Keep Last N CISD Levels", minval=1, maxval=50, group=GROUP_CISD)
+cisdPivotLeft        = input.int(1, "CISD Pivot Left", minval=1, group=GROUP_CISD)
+cisdPivotRight       = input.int(1, "CISD Pivot Right", minval=1, group=GROUP_CISD)
+
+// --- T-SPOT SETTINGS ---
+GROUP_TSPOT = "T-Spot (HTF Overlay)"
+showTspot     = input.bool(true, "Show T-Spot Zones", group=GROUP_TSPOT)
+box1BullColor = input.color(color.new(#cc00ff, 85), "Opening Range Box (Bull)", group=GROUP_TSPOT)
+box1BearColor = input.color(color.new(#0051ff, 85), "Opening Range Box (Bear)", group=GROUP_TSPOT)
+
+// --- CONTEXT SENSITIVITY ---
+GROUP_CONTEXT = "Context Sensitivity"
+useMitigatedFvg      = input.bool(false, "Use Mitigated (Yellow) FVGs?", group=GROUP_CONTEXT)
+strictFvgContainment = input.bool(false, "Strict FVG Containment?", group=GROUP_CONTEXT)
+fvgToleranceTicks    = input.float(0.1, "POI Touch Tolerance (ticks)", minval=0.0, step=0.1, group=GROUP_CONTEXT)
+sweepTolTicks        = input.float(1.0, "Sweep Tolerance (ticks)", minval=0.0, step=0.1, group=GROUP_CONTEXT)
+showContextDebug     = input.bool(true, "Show Context POI Labels (Debug)", group=GROUP_CONTEXT)
+
+// --- FVG DISPLAY SETTINGS ---
+GROUP_FVG = "FVG Settings (Display)"
+fvgExtendBars = input.int(50, "FVG extend (bars)", minval=1, maxval=2000, group=GROUP_FVG)
+keepLastFvgCount = input.int(50, "Keep last N Active FVGs", minval=1, maxval=200, group=GROUP_FVG)
+keepLastMitigatedFvgCount = input.int(50, "Keep last N Mitigated FVGs", minval=0, maxval=200, group=GROUP_FVG)
+maxFvgHistoryCount = input.int(50, "Max FVG Memory (Total)", minval=10, maxval=500, group=GROUP_FVG)
+maxFvgAgeBars = input.int(200, "Only use FVGs from last N bars", minval=1, maxval=10000, group=GROUP_FVG)
+enableFvgBoxes = input.bool(true, "Show FVG zones", group=GROUP_FVG)
+
+// --- SWING SETTINGS ---
+GROUP_SWING = "Swing Settings (Visuals)"
+keepLastSwingCount = input.int(50, "Keep Last N Swing Levels", minval=1, maxval=200, group=GROUP_SWING)
+showSwingDebug     = input.bool(true, "Show Swing Point Labels", group=GROUP_SWING)
+keepLastMitigatedSwingCount = input.int(50, "Keep last N mitigated Swings", minval=10, maxval=200, group=GROUP_SWING)
+
+// --- HTF SEPARATORS SETTINGS ---
+GROUP_HTF = "Timeframe Separators"
+showHTFBoundaries = input.bool(true, "Show HTF Boundaries", group=GROUP_HTF)
+htfStartLineColor = input.color(color.new(color.green, 60), "Start Line Color", group=GROUP_HTF)
+htfEndLineColor   = input.color(color.new(color.red, 60), "End Line Color", group=GROUP_HTF)
+maxHtfLines       = input.int(22, "Max Lines History", group=GROUP_HTF)
+
+// ================================================================= //
+//                   AUTO BIAS: DAILY DATA (200-BAR ARRAYS)          //
+// ================================================================= //
+// We fetch the Daily OHLC series via request.security and on every
+// new Daily bar push the newly-confirmed candle into persistent arrays.
+// This gives us up to 200 confirmed Daily candles to scan for POIs
+// (FVGs, swing highs/lows, CISD levels) entirely in Daily context,
+// so the auto-bias POI check is never contaminated by intraday data.
+// lookahead_off = only confirmed/closed Daily candles, no repainting.
+// ================================================================= //
+
+// --- Raw Daily series (available on any chart timeframe) ---
+[d_open_raw, d_high_raw, d_low_raw, d_close_raw] = request.security(
+     syminfo.tickerid, "D",
+     [open, high, low, close],
+     lookahead = barmerge.lookahead_off)
+
+// --- 200-bar Daily OHLC arrays ---
+int   D_MAX    = 200
+var float[] d_arr_open  = array.new_float(0)
+var float[] d_arr_high  = array.new_float(0)
+var float[] d_arr_low   = array.new_float(0)
+var float[] d_arr_close = array.new_float(0)
+
+// Fire once on the first intraday bar of each new trading day
+bool isNewDailyBar = ta.change(time("D")) != 0
+
+if isNewDailyBar
+    // [1] = the just-closed Daily candle (yesterday from today's perspective)
+    array.push(d_arr_open,  d_open_raw[1])
+    array.push(d_arr_high,  d_high_raw[1])
+    array.push(d_arr_low,   d_low_raw[1])
+    array.push(d_arr_close, d_close_raw[1])
+    if array.size(d_arr_close) > D_MAX
+        array.shift(d_arr_open)
+        array.shift(d_arr_high)
+        array.shift(d_arr_low)
+        array.shift(d_arr_close)
+
+// --- Convenience: yesterday and day-before from the arrays ---
+// Index (n-1) = most recent confirmed candle = yesterday
+// Index (n-2) = day before yesterday
+// We only read these when the array has at least 3 entries.
+int   _dSz        = array.size(d_arr_close)
+float d_yest_open  = _dSz >= 1 ? array.get(d_arr_open,  _dSz - 1) : na
+float d_yest_high  = _dSz >= 1 ? array.get(d_arr_high,  _dSz - 1) : na
+float d_yest_low   = _dSz >= 1 ? array.get(d_arr_low,   _dSz - 1) : na
+float d_yest_close = _dSz >= 1 ? array.get(d_arr_close, _dSz - 1) : na
+
+float d_prev_open  = _dSz >= 2 ? array.get(d_arr_open,  _dSz - 2) : na
+float d_prev_high  = _dSz >= 2 ? array.get(d_arr_high,  _dSz - 2) : na
+float d_prev_low   = _dSz >= 2 ? array.get(d_arr_low,   _dSz - 2) : na
+float d_prev_close = _dSz >= 2 ? array.get(d_arr_close, _dSz - 2) : na
+
+float d_3ago_low   = _dSz >= 3 ? array.get(d_arr_low,   _dSz - 3) : na
+float d_3ago_high  = _dSz >= 3 ? array.get(d_arr_high,  _dSz - 3) : na
+
+// --- Daily C2 signals (pure price, evaluated from Daily arrays) ---
+// Bull C2: yesterday's low swept below day-before's low AND closed back above it
+// Bear C2: yesterday's high swept above day-before's high AND closed back below it
+bool daily_c2_bull = not na(d_yest_low)  and not na(d_prev_low)  and d_yest_low  < d_prev_low  and d_yest_close > d_prev_low
+bool daily_c2_bear = not na(d_yest_high) and not na(d_prev_high) and d_yest_high > d_prev_high and d_yest_close < d_prev_high
+
+// --- Daily C3 signals ---
+// Bull C3: day-before's close was below bar-3's low AND yesterday closed above day-before's open
+// Bear C3: day-before's close was above bar-3's high AND yesterday closed below day-before's open
+bool daily_c3_bull = not na(d_prev_close) and not na(d_3ago_low)  and d_prev_close < d_3ago_low  and not na(d_yest_close) and d_yest_close > d_prev_open
+bool daily_c3_bear = not na(d_prev_close) and not na(d_3ago_high) and d_prev_close > d_3ago_high and not na(d_yest_close) and d_yest_close < d_prev_open
+
+// --- Daily sweep conditions (price only, POI check done later via Daily arrays) ---
+bool daily_sweep_bull = not na(d_yest_low)  and not na(d_prev_low)  and d_yest_low  < d_prev_low  and d_yest_close > d_prev_low
+bool daily_sweep_bear = not na(d_yest_high) and not na(d_prev_high) and d_yest_high > d_prev_high and d_yest_close < d_prev_high
+
+// --- Daily-context POI arrays (built from the 200-bar Daily arrays) ---
+// These are populated in the AUTO BIAS CALCULATION block below (after all
+// helper functions are defined) and hold the POI results for the sweep check.
+var bool daily_sweep_bull_poi = false
+var bool daily_sweep_bear_poi = false
+
+// ================================================================= //
+//               Custom Types & Global Variables                    //
+// ================================================================= //
+
+type PotentialSetup
+    int pivotBarIndex
+    float breakLevel
+    int runOpenBarIndex
+
+type Fvg
+    float top
+    float bottom
+    int   startBar
+    box   visualBox
+    bool  isMitigated = false
+    int   mitigationBar = na
+
+type Cisd
+    float runOpen
+    float runClose
+    float breakLevel
+    float pivotPrice
+    int   startBarIndex
+    int   pivotBarIndex
+    line  visualLine
+    label mainLabel
+    label openLabel
+    label closeLabel
+    bool  isBullish
+    bool  isMitigated = false
+    int   mitigationBar = na
+
+type Swing
+    float price
+    int   barIndex
+    label debugLabel
+    bool  isMitigated = false
+    int   mitigationBar = na
+
+// Storage Arrays
+var Fvg[] activeBullFvgs = array.new<Fvg>()
+var Fvg[] activeBearFvgs = array.new<Fvg>()
+var Fvg[] mitigatedFvgs  = array.new<Fvg>()
+
+var Cisd[] activeBullCisds = array.new<Cisd>()
+var Cisd[] activeBearCisds = array.new<Cisd>()
+
+var Swing[] activeHighSwings = array.new<Swing>()
+var Swing[] activeLowSwings  = array.new<Swing>()
+var Swing[] mitigatedHighSwings = array.new<Swing>()
+var Swing[] mitigatedLowSwings  = array.new<Swing>()
+
+var PotentialSetup bullSetup = na
+var PotentialSetup bearSetup = na
+
+var line[] bullContOBLines  = array.new_line()
+var line[] bearContOBLines  = array.new_line()
+var label[] bullContOBLabels = array.new_label()
+var label[] bearContOBLabels = array.new_label()
+
+var line[] htfBoundaryLines  = array.new_line()
+var int storedHtfTime        = na
+var int lastDrawnHtfTime     = na
+var bool systemInitialized   = false
+bool isNewHtfBar             = false
+var box bullTspotBox1        = na
+var box bearTspotBox1        = na
+var int htfBarStartIndex     = na
+
+var float snap_prevHtfH = na
+var float snap_prevHtfL = na
+var float snap_prevHtfO = na
+var float snap_prevHtfC = na
+var float snap_htfOpen  = na
+
+bool signalC2Bull   = false
+bool signalC2Bear   = false
+bool signalC3Bull   = false
+bool signalC3Bear   = false
+bool signalCisdBull = false
+bool signalCisdBear = false
+
+var bool cHighCtx     = false
+var string cHighreason = ""
+var bool cLowCtx      = false
+var string cLowreason  = ""
+
+var float allTimeHighSoFar = na
+var float allTimeLowSoFar  = na
+
+// ================================================================= //
+//               AUTO BIAS STATE (persistent across bars)           //
+// ================================================================= //
+// autoBias holds the computed daily bias: "Bullish Only", "Bearish Only", or "Both"
+// It is recalculated once per new Daily bar and persists for all intraday bars.
+var string autoBias       = "Both"
+var string autoBiasReason = ""
+var label  autoBiasLabel  = na
+
+// ================================================================= //
+//              EFFECTIVE BIAS RESOLUTION                            //
+// ================================================================= //
+// When tradingBias == "Auto (Daily)" we use autoBias, otherwise the manual selection.
+string effectiveBias = tradingBias == "Auto (Daily)" ? autoBias : tradingBias
+
+bool doCheckBullish = effectiveBias == "Both" or effectiveBias == "Bullish Only"
+bool doCheckBearish = effectiveBias == "Both" or effectiveBias == "Bearish Only"
+
+// ================================================================= //
+//                  DATA STRUCTURE HELPER FUNCTIONS                  //
+// ================================================================= //
+
+if showBarIndex
+    label.new(x=bar_index, y=low, text=str.tostring(bar_index), style=label.style_label_down, textcolor=color.white, size=size.small)
+
+getHigherTimeframe(string tf) =>
+    switch tf
+        "3"   => "30"
+        "5"   => "60"
+        "15"  => "240"
+        "30"  => "D"
+        "60"  => "D"
+        "240" => "W"
+        => "D"
+
+processFvgMitigation(Fvg _fvg) =>
+    _fvg.isMitigated    := true
+    _fvg.mitigationBar  := bar_index
+    if not na(_fvg.visualBox) and enableFvgBoxes
+        box.set_bgcolor(_fvg.visualBox,       color.new(color.yellow, 80))
+        box.set_border_color(_fvg.visualBox,  color.new(color.yellow, 80))
+        box.set_right(_fvg.visualBox, bar_index)
+    else if not na(_fvg.visualBox)
+        box.delete(_fvg.visualBox)
+
+addFairValueGap(float _top, float _bot, bool _isBullish) =>
+    float fvgTop    = math.max(_top, _bot)
+    float fvgBottom = math.min(_top, _bot)
+    box drawBox = na
+    if enableFvgBoxes
+        drawBox := box.new(bar_index, fvgTop, bar_index + fvgExtendBars, fvgBottom, xloc=xloc.bar_index, bgcolor=color.new(#aaa796, 85), border_color=color.new(#c4baac, 0))
+    Fvg newFvg = Fvg.new(fvgTop, fvgBottom, bar_index, drawBox, false)
+    targetArray = _isBullish ? activeBullFvgs : activeBearFvgs
+    array.push(targetArray, newFvg)
+    if array.size(targetArray) > maxFvgHistoryCount
+        Fvg oldFvg = array.shift(targetArray)
+        if not na(oldFvg.visualBox)
+            box.delete(oldFvg.visualBox)
+
+mitigateFairValueGaps() =>
+    if array.size(activeBullFvgs) > 0
+        for i = array.size(activeBullFvgs) - 1 to 0
+            Fvg f = array.get(activeBullFvgs, i)
+            if bar_index > f.startBar
+                if close < f.bottom or (low < f.bottom and high > f.top)
+                    array.remove(activeBullFvgs, i)
+                    processFvgMitigation(f)
+                    array.push(mitigatedFvgs, f)
+                    if array.size(mitigatedFvgs) > keepLastMitigatedFvgCount
+                        Fvg oldMit = array.shift(mitigatedFvgs)
+                        box.delete(oldMit.visualBox)
+    if array.size(activeBearFvgs) > 0
+        for i = array.size(activeBearFvgs) - 1 to 0
+            Fvg f = array.get(activeBearFvgs, i)
+            if bar_index > f.startBar
+                if close > f.top or (low < f.bottom and high > f.top)
+                    array.remove(activeBearFvgs, i)
+                    processFvgMitigation(f)
+                    array.push(mitigatedFvgs, f)
+                    if array.size(mitigatedFvgs) > keepLastMitigatedFvgCount
+                        Fvg oldMit = array.shift(mitigatedFvgs)
+                        box.delete(oldMit.visualBox)
+
+mitigateSwings() =>
+    if array.size(activeHighSwings) > 0
+        for i = array.size(activeHighSwings) - 1 to 0
+            Swing s = array.get(activeHighSwings, i)
+            if high > s.price
+                array.remove(activeHighSwings, i)
+                s.isMitigated   := true
+                s.mitigationBar := bar_index
+                array.push(mitigatedHighSwings, s)
+                if array.size(mitigatedHighSwings) > keepLastMitigatedSwingCount
+                    array.shift(mitigatedHighSwings)
+    if array.size(activeLowSwings) > 0
+        for j = array.size(activeLowSwings) - 1 to 0
+            Swing s = array.get(activeLowSwings, j)
+            if low < s.price
+                array.remove(activeLowSwings, j)
+                s.isMitigated   := true
+                s.mitigationBar := bar_index
+                array.push(mitigatedLowSwings, s)
+                if array.size(mitigatedLowSwings) > keepLastMitigatedSwingCount
+                    array.shift(mitigatedLowSwings)
+
+mitigateCisds() =>
+    if array.size(activeBullCisds) > 0
+        for i = array.size(activeBullCisds) - 1 to 0 by 1
+            Cisd c = array.get(activeBullCisds, i)
+            if low < c.pivotPrice
+                c.isMitigated   := true
+                c.mitigationBar := bar_index
+                line.set_color(c.visualLine, color.new(color.gray, 50))
+                line.set_style(c.visualLine, line.style_dotted)
+                array.remove(activeBullCisds, i)
+    if array.size(activeBearCisds) > 0
+        for i = array.size(activeBearCisds) - 1 to 0
+            Cisd c = array.get(activeBearCisds, i)
+            if high > c.pivotPrice
+                c.isMitigated   := true
+                c.mitigationBar := bar_index
+                line.set_color(c.visualLine, color.new(color.gray, 50))
+                line.set_style(c.visualLine, line.style_dotted)
+                array.remove(activeBearCisds, i)
+
+mitigateFairValueGaps()
+mitigateSwings()
+mitigateCisds()
+
+addCisd(PotentialSetup setup, bool isBullish, string reason, float pivotPrice) =>
+    int currentDistToPivot    = bar_index - setup.pivotBarIndex
+    int currentDistToRunOpen  = bar_index - setup.runOpenBarIndex
+    line l = line.new(setup.runOpenBarIndex, setup.breakLevel, bar_index, setup.breakLevel, color=isBullish ? cisdBullColor : cisdBearColor, style=line.style_solid, width=1)
+    label ml = na
+    string lblText = "CISD" + (showContextDebug ? " - [" + reason + "]" : "")
+    if cisdShowLabels
+        ml := label.new(math.round(math.avg(setup.pivotBarIndex, bar_index)), setup.breakLevel, lblText, style=isBullish ? label.style_label_down : label.style_label_up, color=color(na), textcolor=color.black, size=cisdTextSize)
+    float rOpen = setup.breakLevel
+    float rClose = na
+    int rCloseBarOffSet = currentDistToPivot
+    if currentDistToRunOpen > currentDistToPivot
+        float extClose = close[currentDistToPivot]
+        for i = currentDistToPivot to currentDistToRunOpen
+            float c = close[i]
+            extClose := isBullish ? math.min(extClose, c) : math.max(extClose, c)
+        float pClose  = close[currentDistToPivot]
+        float prClose = close[currentDistToPivot + 1]
+        bool cond = isBullish ? (pClose > extClose or pClose > prClose) : (pClose < extClose or pClose < prClose)
+        if cond
+            rCloseBarOffSet := currentDistToPivot + 1
+    rClose := close[rCloseBarOffSet]
+    label ol = na
+    label cl = na
+    if cisdShowExtraLabels
+        ol := label.new(setup.runOpenBarIndex, rOpen, "runOpen", style=label.style_label_right, color=color.new(color.blue, 0), textcolor=color.white, size=size.tiny)
+        cl := label.new(bar_index - rCloseBarOffSet, rClose, "runClose", style=label.style_label_left, color=color.new(color.black, 0), textcolor=color.white, size=size.tiny)
+    Cisd newCisd = Cisd.new(rOpen, rClose, setup.breakLevel, pivotPrice, setup.runOpenBarIndex, setup.pivotBarIndex, l, ml, ol, cl, isBullish)
+    targetArr = isBullish ? activeBullCisds : activeBearCisds
+    array.push(targetArr, newCisd)
+    if array.size(targetArr) > keepLastCisds
+        array.shift(targetArr)
+
+// ================================================================= //
+//               CORE LOGIC & PIVOTS                                 //
+// ================================================================= //
+
+if low > high[2]
+    addFairValueGap(low, high[2], true)
+if high < low[2]
+    addFairValueGap(high, low[2], false)
+
+detPH = ta.pivothigh(high, c2PivotLength, c2PivotLength)
+detPL = ta.pivotlow(low,  c2PivotLength, c2PivotLength)
+
+if not na(detPH)
+    label dl = na
+    if showSwingDebug and doCheckBearish
+        dl := label.new(bar_index - c2PivotLength, detPH + 1, "PH", style=label.style_label_down, color=color.new(color.red, 50), textcolor=color.white, size=size.tiny)
+    Swing s = Swing.new(detPH, bar_index - c2PivotLength, dl, false)
+    array.push(activeHighSwings, s)
+    if array.size(activeHighSwings) > keepLastSwingCount
+        array.shift(activeHighSwings)
+
+if not na(detPL)
+    label dl = na
+    if showSwingDebug and doCheckBullish
+        dl := label.new(bar_index - c2PivotLength, detPL - 1, "PL", style=label.style_label_up, color=color.new(color.green, 50), textcolor=color.white, size=size.tiny)
+    Swing s = Swing.new(detPL, bar_index - c2PivotLength, dl, false)
+    array.push(activeLowSwings, s)
+    if array.size(activeLowSwings) > keepLastSwingCount
+        array.shift(activeLowSwings)
+
+// ================================================================= //
+//               CONTEXT LOGIC (Refactored Backwards)                //
+// ================================================================= //
+
+float _fvgTol = fvgToleranceTicks * syminfo.mintick
+float _tol    = sweepTolTicks * syminfo.mintick
+
+touches_bear_fvg(float _price, int _barIdx) =>
+    bool found = false
+    if array.size(activeBearFvgs) > 0
+        for i = array.size(activeBearFvgs) - 1 to 0 by 1
+            Fvg selectedFvg = array.get(activeBearFvgs, i)
+            if selectedFvg.isMitigated == false
+                if (bar_index - selectedFvg.startBar) <= maxFvgAgeBars
+                    if _price >= selectedFvg.bottom and _price <= selectedFvg.top
+                        found := true
+                        break
+    if not found and array.size(mitigatedFvgs) > 0
+        for i = array.size(mitigatedFvgs) - 1 to 0 by 1
+            Fvg f = array.get(mitigatedFvgs, i)
+            if f.mitigationBar == _barIdx
+                found := true
+                break
+    found
+
+touches_bull_fvg(float _price, int _barIdx) =>
+    bool found = false
+    if array.size(activeBullFvgs) > 0
+        for i = array.size(activeBullFvgs) - 1 to 0 by 1
+            Fvg selectedFvg = array.get(activeBullFvgs, i)
+            if selectedFvg.isMitigated == false
+                if (bar_index - selectedFvg.startBar) <= maxFvgAgeBars
+                    if _price >= selectedFvg.bottom and _price <= selectedFvg.top
+                        found := true
+                        break
+    if not found and array.size(mitigatedFvgs) > 0
+        for i = array.size(mitigatedFvgs) - 1 to 0 by 1
+            Fvg f = array.get(mitigatedFvgs, i)
+            if f.mitigationBar == _barIdx
+                found := true
+                break
+    found
+
+f_touches_any_fvg(float _price, bool checkHigh) =>
+    bool found = false
+    if array.size(activeBullFvgs) > 0 and checkHigh == true
+        for i = array.size(activeBullFvgs) - 1 to 0 by 1
+            Fvg selectedFvg = array.get(activeBullFvgs, i)
+            if selectedFvg.isMitigated == false
+                if (bar_index - selectedFvg.startBar) <= maxFvgAgeBars
+                    if checkHigh ? (_price >= selectedFvg.bottom - _fvgTol) : (_price <= selectedFvg.top + _fvgTol)
+                        found := true
+                        break
+    if found == false and array.size(activeBearFvgs) > 0 and checkHigh == false
+        for i = array.size(activeBearFvgs) - 1 to 0 by 1
+            Fvg selectedFvg = array.get(activeBearFvgs, i)
+            if selectedFvg.isMitigated == false
+                if (bar_index - selectedFvg.startBar) <= maxFvgAgeBars
+                    if checkHigh ? (_price >= selectedFvg.bottom - _fvgTol) : (_price <= selectedFvg.top + _fvgTol)
+                        found := true
+                        break
+    found
+
+f_touches_cisd_history(float _price, bool checkBullishHistory) =>
+    bool found = false
+    historyArray = checkBullishHistory ? activeBullCisds : activeBearCisds
+    int sz = array.size(historyArray)
+    if sz > 0
+        int stopAt = math.max(0, sz - 3)
+        for i = sz - 1 to stopAt by 1
+            Cisd c = array.get(historyArray, i)
+            if c.isMitigated == false
+                float rTop = math.max(c.runOpen, c.runClose)
+                float rBot = math.min(c.runOpen, c.runClose)
+                if _price >= (rBot - _fvgTol) and _price <= (rTop + _fvgTol)
+                    found := true
+                    break
+    found
+
+ph_cisd = ta.pivothigh(high, cisdPivotLeft, cisdPivotRight)
+pl_cisd = ta.pivotlow(low,  cisdPivotLeft, cisdPivotRight)
+
+allTimeHighSoFar := na(allTimeHighSoFar) ? high : math.max(allTimeHighSoFar, high)
+allTimeLowSoFar  := na(allTimeLowSoFar)  ? low  : math.min(allTimeLowSoFar,  low)
+
+f_pivot_sets_new_all_time_high(int pivotOffsetBars) =>
+    float pivotHigh      = high[pivotOffsetBars]
+    float priorAllTimeHigh = allTimeHighSoFar[pivotOffsetBars + 1]
+    not na(priorAllTimeHigh) and pivotHigh > priorAllTimeHigh
+
+f_pivot_sets_new_all_time_low(int pivotOffsetBars) =>
+    float pivotLow      = low[pivotOffsetBars]
+    float priorAllTimeLow = allTimeLowSoFar[pivotOffsetBars + 1]
+    not na(priorAllTimeLow) and pivotLow < priorAllTimeLow
+
+f_check_bear_context_at_price(float _chkPrice, int _chkBarIndex) =>
+    bool sweepFound = false
+    string reason = ""
+    if array.size(activeHighSwings) > 0
+        for i = array.size(activeHighSwings) - 1 to 0 by 1
+            Swing s = array.get(activeHighSwings, i)
+            if s.barIndex >= _chkBarIndex
+                continue
+            if _chkPrice > s.price
+                sweepFound := true
+                reason := "Sweep"
+                if showContextDebug and doCheckBearish
+                    line.new(s.barIndex, s.price, bar_index, s.price, color=color.new(color.black, 50), style=line.style_dotted, width=3)
+                break
+    if not sweepFound and array.size(mitigatedHighSwings) > 0
+        for i = array.size(mitigatedHighSwings) - 1 to 0 by 1
+            Swing s = array.get(mitigatedHighSwings, i)
+            if s.mitigationBar == _chkBarIndex
+                sweepFound := true
+                reason := "Sweep-Mit"
+                if showContextDebug and doCheckBearish
+                    line.new(s.barIndex, s.price, _chkBarIndex, s.price, color=color.new(color.black, 50), style=line.style_dotted, width=2)
+                break
+    bool touchesBearFvg      = touches_bear_fvg(_chkPrice, _chkBarIndex)
+    if not sweepFound and touchesBearFvg
+        reason := "FVG"
+    bool touchesPrevBearCisd = usePrevCisdAsPOI and f_touches_cisd_history(_chkPrice, false)
+    if not sweepFound and not touchesBearFvg and touchesPrevBearCisd
+        reason := "PrevCISD"
+    [sweepFound or touchesBearFvg or touchesPrevBearCisd, reason]
+
+f_check_bull_context_at_price(float _chkPrice, int _chkBarIndex) =>
+    bool sweepFound = false
+    string reason = ""
+    if array.size(activeLowSwings) > 0
+        for i = array.size(activeLowSwings) - 1 to 0 by 1
+            Swing s = array.get(activeLowSwings, i)
+            if s.barIndex >= _chkBarIndex
+                continue
+            if _chkPrice < s.price
+                sweepFound := true
+                reason := "Sweep"
+                if showContextDebug and doCheckBullish
+                    line.new(s.barIndex, s.price, bar_index, s.price, color=color.new(color.black, 50), style=line.style_dotted, width=3)
+                break
+    if not sweepFound and array.size(mitigatedLowSwings) > 0
+        for i = array.size(mitigatedLowSwings) - 1 to 0
+            Swing s = array.get(mitigatedLowSwings, i)
+            if s.mitigationBar == _chkBarIndex
+                sweepFound := true
+                reason := "Sweep-Mit"
+                if showContextDebug and doCheckBullish
+                    line.new(s.barIndex, s.price, _chkBarIndex, s.price, color=color.new(color.black, 50), style=line.style_dotted, width=2)
+                break
+    bool touchesBullFvg      = touches_bull_fvg(_chkPrice, _chkBarIndex)
+    if not sweepFound and touchesBullFvg
+        reason := "FVG"
+    bool touchesPrevBullCisd = usePrevCisdAsPOI and f_touches_cisd_history(_chkPrice, true)
+    if not sweepFound and not touchesBullFvg and touchesPrevBullCisd
+        reason := "PrevCISD"
+    [sweepFound or touchesBullFvg or touchesPrevBullCisd, reason]
+
+f_cisd_high_has_context(int _pIdx, int _rIdx) =>
+    bool isNewAllTimeHigh = f_pivot_sets_new_all_time_high(bar_index - _pIdx)
+    if isNewAllTimeHigh
+        if showContextDebug
+            label.new(_pIdx, high[cisdPivotRight] + ta.atr(14)*0.6, "All Time High", style=label.style_label_down, textcolor=color.black, color=color.rgb(236, 129, 117), size=size.tiny)
+        [true, "AllTimeHigh"]
+    else
+        float pivotHigh = high[bar_index - _pIdx]
+        [pivFound, pivReason] = f_check_bear_context_at_price(pivotHigh, _pIdx)
+        if showContextDebug and pivFound
+            label.new(_pIdx, high[cisdPivotRight] + ta.atr(14)*0.6, pivReason, style=label.style_label_down, textcolor=color.black, color=color.rgb(236, 129, 117), size=size.tiny)
+        if pivFound
+            [true, pivReason]
+        else
+            bool runFound = false
+            string runReason = ""
+            int currentOffsetToPivot   = bar_index - _pIdx
+            int currentOffsetToRunOpen = bar_index - _rIdx
+            if currentOffsetToRunOpen >= currentOffsetToPivot
+                for i = currentOffsetToPivot to currentOffsetToRunOpen
+                    [rFound, rReason] = f_check_bear_context_at_price(high[i], bar_index - i)
+                    if rFound
+                        runFound  := true
+                        runReason := "Run-" + rReason
+                        if showContextDebug and runFound
+                            label.new(_pIdx, high[cisdPivotRight] + ta.atr(14)*0.6, runReason, style=label.style_label_down, textcolor=color.black, color=color.rgb(236, 129, 117), size=size.tiny)
+                        break
+            [runFound, runReason]
+
+f_cisd_low_has_context(int _pIdx, int _rIdx, float openPrice) =>
+    bool isNewAllTimeLow = f_pivot_sets_new_all_time_low(bar_index - _pIdx)
+    if isNewAllTimeLow
+        if showContextDebug
+            label.new(_pIdx, low[cisdPivotRight] - ta.atr(14)*0.6, "All Time low", style=label.style_label_down, textcolor=color.black, color=color.rgb(3, 250, 73), size=size.tiny)
+        [true, "AllTimeLow"]
+    else
+        float pivotLow = low[bar_index - _pIdx]
+        [pivFound, pivReason] = f_check_bull_context_at_price(pivotLow, _pIdx)
+        if showContextDebug and pivFound
+            label.new(_pIdx, low[cisdPivotRight] - ta.atr(14)*0.6, pivReason, style=label.style_label_up, textcolor=color.black, color=color.rgb(3, 250, 73), size=size.tiny)
+        if pivFound
+            [true, pivReason]
+        else
+            bool runFound = false
+            string runReason = ""
+            int currentOffsetToPivot   = bar_index - _pIdx
+            int currentOffsetToRunOpen = bar_index - _rIdx
+            if currentOffsetToRunOpen >= currentOffsetToPivot
+                for i = currentOffsetToPivot to currentOffsetToRunOpen
+                    [rFound, rReason] = f_check_bull_context_at_price(low[i], bar_index - i)
+                    if rFound
+                        runFound  := true
+                        runReason := "Run-" + rReason
+                        if showContextDebug and runFound
+                            label.new(_pIdx, low[cisdPivotRight] - ta.atr(14)*0.6, runReason, style=label.style_label_up, textcolor=color.black, color=color.rgb(3, 250, 73), size=size.tiny)
+                        break
+            [runFound, runReason]
+
+// ================================================================= //
+//               AUTO BIAS CALCULATION                               //
+// ================================================================= //
+// Runs on every bar; only updates autoBias when a new Daily bar fires.
+//
+// BULLISH conditions (any one sufficient):
+//   1. Yesterday closed above day-before's high
+//   2. Yesterday swept below day-before's low AND closed back above it
+//      AND that low sits at a Daily POI (FVG / swing / prev CISD)
+//   3. A bullish Daily C2 or C3 formed yesterday
+//
+// BEARISH conditions (any one sufficient):
+//   1. Yesterday closed below day-before's low
+//   2. Yesterday swept above day-before's high AND closed back below it
+//      AND that high sits at a Daily POI (FVG / swing / prev CISD)
+//   3. A bearish Daily C2 or C3 formed yesterday
+//
+// POI detection uses ONLY the 200-bar Daily arrays — never the intraday arrays.
+// ================================================================= //
+
+// ---- Daily-context POI helper functions ----
+// These scan d_arr_* (Daily arrays) to find FVGs, swing highs/lows, and CISD zones.
+// They are defined here, after all intraday helper functions, so they can safely
+// reference _dSz and the d_arr_* arrays which are already populated above.
+
+// Returns true if `_price` sits inside an unmitigated Daily bullish FVG.
+// A bullish Daily FVG exists between candle[i] and candle[i+2] when low[i] > high[i+2].
+// "Unmitigated" means no subsequent Daily close has crossed back below the FVG bottom.
+f_daily_bull_fvg_at_price(float _price) =>
+    bool found = false
+    int sz = array.size(d_arr_close)
+    if sz >= 3
+        // Scan from most-recent backward; skip the last 1 entry (need i+2 to exist)
+        for i = sz - 2 to 1
+            float fvgTop    = array.get(d_arr_low,  i)       // candle[i] low
+            float fvgBottom = array.get(d_arr_high, i + 1)   // candle[i+2] high (index i+1 = 2 bars earlier)
+            // A bullish FVG: gap between high of [i+2] and low of [i]
+            // In array terms: index i = most recent of the three, i+1 = middle, i+2 = oldest
+            // We need low[i] > high[i+2]
+            float oldHigh = i + 2 <= sz - 1 ? array.get(d_arr_high, i + 2) : na
+            if na(oldHigh)
+                break
+            if array.get(d_arr_low, i) > oldHigh
+                float top = array.get(d_arr_low, i)
+                float bot = oldHigh
+                // Check if price falls in this gap
+                if _price >= bot and _price <= top
+                    // Mitigation check: did any candle after [i] close below bot?
+                    bool mitigated = false
+                    if i > 0
+                        for j = i - 1 to 0
+                            if array.get(d_arr_close, j) < bot
+                                mitigated := true
+                                break
+                    if not mitigated
+                        found := true
+                        break
+    found
+
+// Returns true if `_price` sits inside an unmitigated Daily bearish FVG.
+// A bearish Daily FVG: high[i] < low[i+2]
+f_daily_bear_fvg_at_price(float _price) =>
+    bool found = false
+    int sz = array.size(d_arr_close)
+    if sz >= 3
+        for i = sz - 2 to 1
+            float oldLow = i + 2 <= sz - 1 ? array.get(d_arr_low, i + 2) : na
+            if na(oldLow)
+                break
+            if array.get(d_arr_high, i) < oldLow
+                float top = oldLow
+                float bot = array.get(d_arr_high, i)
+                if _price >= bot and _price <= top
+                    bool mitigated = false
+                    if i > 0
+                        for j = i - 1 to 0
+                            if array.get(d_arr_close, j) > top
+                                mitigated := true
+                                break
+                    if not mitigated
+                        found := true
+                        break
+    found
+
+// Returns true if `_price` sweeps (goes below) any prior Daily swing low.
+// A Daily swing low at index i: low[i] < low[i-1] AND low[i] < low[i+1]
+// "Sweep" means _price < that swing low (i.e. price went below the swing).
+f_daily_sweep_low(float _price) =>
+    bool found = false
+    int sz = array.size(d_arr_low)
+    if sz >= 3
+        // Skip last entry (index sz-1 = yesterday) — we need i-1 and i+1
+        for i = sz - 2 to 1
+            float pL  = array.get(d_arr_low, i)
+            float pLp = array.get(d_arr_low, i - 1)  // more recent
+            float pLn = array.get(d_arr_low, i + 1)  // older
+            if pL < pLp and pL < pLn
+                // This is a Daily swing low; check if _price swept below it
+                if _price < pL
+                    found := true
+                    break
+    found
+
+// Returns true if `_price` sweeps (goes above) any prior Daily swing high.
+f_daily_sweep_high(float _price) =>
+    bool found = false
+    int sz = array.size(d_arr_high)
+    if sz >= 3
+        for i = sz - 2 to 1
+            float pH  = array.get(d_arr_high, i)
+            float pHp = array.get(d_arr_high, i - 1)
+            float pHn = array.get(d_arr_high, i + 1)
+            if pH > pHp and pH > pHn
+                if _price > pH
+                    found := true
+                    break
+    found
+
+// Returns true if `_price` touches any active Daily CISD zone.
+// A Daily CISD zone is detected by finding a break-of-structure on the Daily arrays:
+// Bull CISD: a candle whose close is below the open (bearish candle), followed later
+//            by a candle that closes back above that bearish candle's open (the breakLevel).
+// Bear CISD: a candle whose close is above the open (bullish candle), followed later
+//            by a candle that closes back below that bullish candle's open.
+// We store the breakLevel and check if _price touches it.
+f_daily_bull_cisd_at_price(float _price) =>
+    bool found = false
+    int sz = array.size(d_arr_close)
+    if sz >= 3
+        for i = sz - 2 to 1
+            float c = array.get(d_arr_close, i)
+            float o = array.get(d_arr_open,  i)
+            if c < o
+                // Bearish Daily candle at index i — its open is the potential bull CISD break level
+                float breakLvl = o
+                // Check if a more-recent candle (index < i) closed above this level
+                bool broken = false
+                if i > 0
+                    for j = i - 1 to 0
+                        if array.get(d_arr_close, j) > breakLvl
+                            broken := true
+                            break
+                if broken
+                    // This is an active bull CISD zone; check if _price touches the breakLevel
+                    if math.abs(_price - breakLvl) <= 2 * syminfo.mintick * 10
+                        found := true
+                        break
+    found
+
+f_daily_bear_cisd_at_price(float _price) =>
+    bool found = false
+    int sz = array.size(d_arr_close)
+    if sz >= 3
+        for i = sz - 2 to 1
+            float c = array.get(d_arr_close, i)
+            float o = array.get(d_arr_open,  i)
+            if c > o
+                float breakLvl = o
+                bool broken = false
+                if i > 0
+                    for j = i - 1 to 0
+                        if array.get(d_arr_close, j) < breakLvl
+                            broken := true
+                            break
+                if broken
+                    if math.abs(_price - breakLvl) <= 2 * syminfo.mintick * 10
+                        found := true
+                        break
+    found
+
+// ---- Master Daily POI check functions ----
+// Bull POI: price touches a Daily bull FVG, OR sweeps a Daily swing low, OR touches a Daily bull CISD
+f_daily_check_bull_poi(float _price) =>
+    bool atFvg   = f_daily_bull_fvg_at_price(_price)
+    bool atSwing = f_daily_sweep_low(_price)
+    bool atCisd  = usePrevCisdAsPOI and f_daily_bull_cisd_at_price(_price)
+    string reason = atFvg ? "D-FVG" : atSwing ? "D-Swing" : atCisd ? "D-CISD" : ""
+    [atFvg or atSwing or atCisd, reason]
+
+// Bear POI: price touches a Daily bear FVG, OR sweeps a Daily swing high, OR touches a Daily bear CISD
+f_daily_check_bear_poi(float _price) =>
+    bool atFvg   = f_daily_bear_fvg_at_price(_price)
+    bool atSwing = f_daily_sweep_high(_price)
+    bool atCisd  = usePrevCisdAsPOI and f_daily_bear_cisd_at_price(_price)
+    string reason = atFvg ? "D-FVG" : atSwing ? "D-Swing" : atCisd ? "D-CISD" : ""
+    [atFvg or atSwing or atCisd, reason]
+
+// ---- Bias evaluation (fires once per new Daily bar) ----
+if tradingBias == "Auto (Daily)" and isNewDailyBar and _dSz >= 3
+    // -------------------------------------------------------
+    // Step 1: detect whether yesterday swept BOTH sides of the
+    // day-before candle (wick below d_prev_low AND wick above
+    // d_prev_high). This is the dual-sweep case.
+    // -------------------------------------------------------
+    bool yest_swept_high = not na(d_yest_high) and not na(d_prev_high) and d_yest_high > d_prev_high
+    bool yest_swept_low  = not na(d_yest_low)  and not na(d_prev_low)  and d_yest_low  < d_prev_low
+    bool isDualSweep     = yest_swept_high and yest_swept_low
+
+    // -------------------------------------------------------
+    // Step 2: run Daily POI checks on both sides regardless.
+    // For the dual-sweep path these are the ONLY checks used.
+    // For the single-sweep path they feed into the normal logic.
+    // -------------------------------------------------------
+    [low_poi_found,  low_poi_reason]  = f_daily_check_bull_poi(d_prev_low)
+    [high_poi_found, high_poi_reason] = f_daily_check_bear_poi(d_prev_high)
+
+    // Update sweep+POI flags (used by normal conditions below)
+    daily_sweep_bull_poi := daily_sweep_bull and low_poi_found
+    daily_sweep_bear_poi := daily_sweep_bear and high_poi_found
+
+    bool isBullish = false
+    bool isBearish = false
+    string bullReason = ""
+    string bearReason = ""
+
+    if isDualSweep
+        // -------------------------------------------------------
+        // DUAL-SWEEP: only the higher-context side drives the bias.
+        //   - High side has POI → bearish (rejected from above)
+        //   - Low  side has POI → bullish (rejected from below)
+        //   - Both or neither   → no clear bias
+        // -------------------------------------------------------
+        if high_poi_found and not low_poi_found
+            isBearish  := true
+            bearReason := "DualSweep-HighPOI+" + high_poi_reason
+        else if low_poi_found and not high_poi_found
+            isBullish  := true
+            bullReason := "DualSweep-LowPOI+" + low_poi_reason
+        else if high_poi_found and low_poi_found
+            // Both sides at POI — no decisive bias
+            isBullish  := true
+            isBearish  := true
+            bullReason := "DualSweep-BothPOI"
+            bearReason := "DualSweep-BothPOI"
+        // else neither side at POI → isBullish/isBearish remain false → "No clear bias"
+    else
+        // -------------------------------------------------------
+        // SINGLE-SWEEP / CLOSE-OUTSIDE: standard conditions
+        // -------------------------------------------------------
+        bool cond_bull_close_above = not na(d_yest_close) and not na(d_prev_high) and d_yest_close > d_prev_high
+        bool cond_bull_sweep_poi   = daily_sweep_bull_poi
+        bool cond_bull_c2c3        = daily_c2_bull or daily_c3_bull
+
+        bool cond_bear_close_below = not na(d_yest_close) and not na(d_prev_low) and d_yest_close < d_prev_low
+        bool cond_bear_sweep_poi   = daily_sweep_bear_poi
+        bool cond_bear_c2c3        = daily_c2_bear or daily_c3_bear
+
+        isBullish := cond_bull_close_above or cond_bull_sweep_poi or cond_bull_c2c3
+        isBearish := cond_bear_close_below or cond_bear_sweep_poi or cond_bear_c2c3
+
+        if cond_bull_close_above
+            bullReason := "CloseAboveHigh"
+        else if cond_bull_sweep_poi
+            bullReason := "SweepLow+" + low_poi_reason
+        else if cond_bull_c2c3
+            bullReason := daily_c2_bull ? "DailyC2Bull" : "DailyC3Bull"
+
+        if cond_bear_close_below
+            bearReason := "CloseBelowLow"
+        else if cond_bear_sweep_poi
+            bearReason := "SweepHigh+" + high_poi_reason
+        else if cond_bear_c2c3
+            bearReason := daily_c2_bear ? "DailyC2Bear" : "DailyC3Bear"
+
+    // -------------------------------------------------------
+    // Step 3: resolve final bias
+    // -------------------------------------------------------
+    if isBullish and not isBearish
+        autoBias       := "Bullish Only"
+        autoBiasReason := "🟢 Bull: " + bullReason
+    else if isBearish and not isBullish
+        autoBias       := "Bearish Only"
+        autoBiasReason := "🔴 Bear: " + bearReason
+    else if isBullish and isBearish
+        autoBias       := "Both"
+        autoBiasReason := "⚪ Both (Bull:" + bullReason + " Bear:" + bearReason + ")"
+    else
+        autoBias       := "Both"
+        autoBiasReason := "⚪ No clear bias"
+
+    if showBiasLabel
+        if not na(autoBiasLabel)
+            label.delete(autoBiasLabel)
+        color lblCol = autoBias == "Bullish Only" ? color.new(color.green, 20) :
+                       autoBias == "Bearish Only" ? color.new(color.red, 20)   :
+                       color.new(color.gray, 20)
+        autoBiasLabel := label.new(
+             bar_index, high + ta.atr(14) * 1.5,
+             "Auto Bias\n" + autoBiasReason,
+             style=label.style_label_down,
+             color=lblCol,
+             textcolor=color.white,
+             size=size.small)
+
+// ================================================================= //
+//               CISD LOGIC                                          //
+// ================================================================= //
+
+if doCheckBearish
+    if not na(ph_cisd)
+        float brk = na
+        int runOpenIdx = na
+        int pivotBarIndex = bar_index - cisdPivotRight
+        for i = 0 to 100
+            int idx = cisdPivotRight + i
+            if close[idx] > open[idx] and not (close[idx + 1] > open[idx + 1])
+                brk       := open[idx]
+                runOpenIdx := bar_index - idx
+                break
+        if showContextDebug
+            string labelText = "Pviot-High " + str.tostring(pivotBarIndex)
+            label.new(pivotBarIndex, high[cisdPivotRight], labelText, style=label.style_label_down, textcolor=color.black, color=color.rgb(236, 129, 117), size=size.tiny)
+        if not na(brk)
+            bool validGeometry = high[cisdPivotRight] > brk
+            if validGeometry
+                [ctx, res] = f_cisd_high_has_context(pivotBarIndex, runOpenIdx)
+                cHighCtx    := ctx
+                cHighreason := res
+                if showContextDebug and ctx
+                    label.new(pivotBarIndex, high[cisdPivotRight] + ta.atr(14)*0.3, "Ctx: " + res, style=label.style_label_down, textcolor=color.black, color=color.rgb(236, 129, 117), size=size.tiny)
+                if cHighCtx
+                    PotentialSetup newSetup = PotentialSetup.new(pivotBarIndex, brk, runOpenIdx)
+                    bullSetup := newSetup
+    if not na(bullSetup)
+        int pOffset  = bar_index - bullSetup.pivotBarIndex
+        float pHigh  = high[pOffset]
+        if high > pHigh
+            bullSetup := na
+        else if close < bullSetup.breakLevel
+            int distToPivot = bar_index - bullSetup.pivotBarIndex
+            addCisd(bullSetup, false, cHighreason, high[distToPivot])
+            bullSetup    := na
+            signalCisdBear := true
+
+if doCheckBullish
+    if not na(pl_cisd)
+        float brk = na
+        int runOpenIdx = na
+        int pivotBarIndex = bar_index - cisdPivotRight
+        for i = 0 to 100
+            int idx = cisdPivotRight + i
+            if close[idx] < open[idx] and not (close[idx + 1] < open[idx + 1])
+                brk       := open[idx]
+                runOpenIdx := bar_index - idx
+                break
+        if showContextDebug
+            string lbl = "Pivot-Low " + str.tostring(pivotBarIndex)
+            label.new(bar_index - cisdPivotRight, low[cisdPivotRight], lbl, style=label.style_label_up, textcolor=color.black, color=color.rgb(3, 250, 73), size=size.tiny)
+        if not na(brk)
+            bool validGeometry = low[cisdPivotRight] < brk and not na(brk)
+            if validGeometry
+                [ctx, res] = f_cisd_low_has_context(pivotBarIndex, runOpenIdx, brk)
+                cLowCtx    := ctx
+                cLowreason := res
+                if showContextDebug and ctx
+                    label.new(pivotBarIndex, low[cisdPivotRight] - ta.atr(14)*0.3, "Ctx: " + res, style=label.style_label_up, textcolor=color.black, color=color.rgb(3, 250, 73), size=size.tiny)
+                if cLowCtx
+                    PotentialSetup newSetup = PotentialSetup.new(bar_index - cisdPivotRight, brk, runOpenIdx)
+                    bearSetup := newSetup
+    if not na(bearSetup)
+        int pOffset = bar_index - bearSetup.pivotBarIndex
+        float pLow  = low[pOffset]
+        if low < pLow
+            bearSetup := na
+        else if close > bearSetup.breakLevel
+            int distToPivot = bar_index - bearSetup.pivotBarIndex
+            addCisd(bearSetup, true, cLowreason, low[distToPivot])
+            bearSetup    := na
+            signalCisdBull := true
+
+// ================================================================= //
+//                  C2 LOGIC                                         //
+// ================================================================= //
+
+if doCheckBullish and showC2Labels and low < low[1] and close > low[1]
+    [hasCtx, reason] = f_check_bull_context_at_price(low, bar_index)
+    if hasCtx
+        label.new(bar_index, low - ta.atr(14)*0.6, "C2" + (showContextDebug ? " " + reason : ""), style=label.style_none, textcolor=c2BullishColor, size=size.small)
+        signalC2Bull := true
+
+if doCheckBearish and showC2Labels and high > high[1] and close < high[1]
+    [hasCtx, reason] = f_check_bear_context_at_price(high, bar_index)
+    if hasCtx
+        label.new(bar_index, high + ta.atr(14)*0.6, "C2" + (showContextDebug ? " " + reason : ""), style=label.style_none, textcolor=c2BearishColor, size=size.small)
+        signalC2Bear := true
+
+// ================================================================= //
+//                  C3 LOGIC                                         //
+// ================================================================= //
+
+if doCheckBullish and showC3Labels and close[1] < low[2] and close > open[1]
+    [ctx1, reason1] = f_check_bull_context_at_price(low[1], bar_index - 1)
+    [ctx2, reason2] = f_check_bull_context_at_price(low,    bar_index)
+    if ctx1 or ctx2
+        label.new(bar_index, low - ta.atr(14)*0.6, "C3" + (showContextDebug ? " " + reason1 : ""), style=label.style_none, textcolor=c2BullishColor, size=size.small)
+        signalC3Bull := true
+
+if doCheckBearish and showC3Labels and close[1] > high[2] and close < open[1]
+    [ctx1, reason1] = f_check_bear_context_at_price(high[1], bar_index - 1)
+    [ctx2, reason2] = f_check_bear_context_at_price(high,    bar_index)
+    if ctx1 or ctx2
+        label.new(bar_index, high + ta.atr(14)*0.6, "C3" + (showContextDebug ? " " + reason1 : ""), style=label.style_none, textcolor=c2BearishColor, size=size.small)
+        signalC3Bear := true
+
+// ================================================================= //
+//               HTF SEPARATORS & T-SPOT LOGIC                       //
+// ================================================================= //
+
+var string dH = getHigherTimeframe(timeframe.period)
+
+hT             = request.security(syminfo.tickerid, dH, time,          lookahead=barmerge.lookahead_on)
+[pH, pL]       = request.security(syminfo.tickerid, dH, [high, low],   lookahead=barmerge.lookahead_off)
+[pHtfO, pHtfC] = request.security(syminfo.tickerid, dH, [open, close], lookahead=barmerge.lookahead_off)
+hO             = request.security(syminfo.tickerid, dH, open,          lookahead=barmerge.lookahead_on)
+
+if not na(hT)
+    if na(storedHtfTime) or hT != storedHtfTime
+        isNewHtfBar      := true
+        storedHtfTime    := hT
+        htfBarStartIndex := bar_index
+        snap_prevHtfH    := pH
+        snap_prevHtfL    := pL
+        snap_prevHtfO    := pHtfO
+        snap_prevHtfC    := pHtfC
+        snap_htfOpen     := hO
+
+if showHTFBoundaries and isNewHtfBar
+    if timeframe.in_seconds(dH) > timeframe.in_seconds()
+        lastDrawnHtfTime := storedHtfTime
+        int sBI = na
+        for i = 0 to 500
+            if time[i] <= (storedHtfTime - (timeframe.in_seconds(dH) * 1000))
+                sBI := bar_index - i
+                break
+        if not na(sBI)
+            array.push(htfBoundaryLines, line.new(sBI, low[bar_index-sBI], sBI, high[bar_index-sBI], color=htfStartLineColor, style=line.style_dotted, width=2, extend=extend.both))
+            array.push(htfBoundaryLines, line.new(bar_index, low, bar_index, high, color=htfEndLineColor, style=line.style_dotted, width=2, extend=extend.both))
+            if array.size(htfBoundaryLines) > maxHtfLines
+                line.delete(array.shift(htfBoundaryLines))
+
+// ================================================================= //
+//               T-SPOT: BOX BOUNDS CALCULATION                      //
+// ================================================================= //
+//
+//  EQ selection priority:
+//   1. Upper wick > body AND upper wick >= lower wick
+//      → EQ = midpoint of upper wick (htfH → bodyTop)
+//      → Bull box: htfH  → wickEQ       (top half of wick)
+//      → Bear box: wickEQ → bodyTop     (bottom half of wick, bounded)
+//   2. Lower wick > body AND lower wick > upper wick
+//      → EQ = midpoint of lower wick (bodyBot → htfL)
+//      → Bull box: bodyBot → wickEQ     (top half of wick, bounded)
+//      → Bear box: wickEQ  → htfL       (bottom half of wick)
+//   3. Neither wick dominates
+//      → EQ = (htfH + htfL) / 2
+//      → Bull box: htfH → EQ
+//      → Bear box: EQ   → htfL
+//
+// ================================================================= //
+f_calcTspotBounds(float htfH, float htfL, float htfO, float htfC) =>
+    float bodyTop   = math.max(htfO, htfC)
+    float bodyBot   = math.min(htfO, htfC)
+    float bodySize  = bodyTop - bodyBot
+    float upperWick = htfH - bodyTop
+    float lowerWick = bodyBot - htfL
+
+    float  bullTop    = na
+    float  bullBottom = na
+    float  bearTop    = na
+    float  bearBottom = na
+    string lbl        = "body"
+
+    if upperWick > bodySize and upperWick >= lowerWick
+        float wickEQ  = (htfH + bodyTop) / 2
+        lbl          := "upper wick"
+        bullTop      := htfH
+        bullBottom   := wickEQ
+        bearTop      := wickEQ
+        bearBottom   := bodyTop
+    else if lowerWick > bodySize and lowerWick > upperWick
+        float wickEQ  = (bodyBot + htfL) / 2
+        lbl          := "lower wick"
+        bullTop      := bodyBot
+        bullBottom   := wickEQ
+        bearTop      := wickEQ
+        bearBottom   := htfL
+    else
+        float fullEQ  = (htfH + htfL) / 2
+        lbl          := "body"
+        bullTop      := htfH
+        bullBottom   := fullEQ
+        bearTop      := fullEQ
+        bearBottom   := htfL
+
+    [bullTop, bullBottom, bearTop, bearBottom, lbl]
+
+if showTspot and not na(htfBarStartIndex)
+    box.delete(bullTspotBox1)
+    box.delete(bearTspotBox1)
+    if not na(snap_prevHtfH) and not na(snap_prevHtfL) and not na(snap_prevHtfO) and not na(snap_prevHtfC)
+        [bTop, bBot, beTop, beBot, lbl] = f_calcTspotBounds(snap_prevHtfH, snap_prevHtfL, snap_prevHtfO, snap_prevHtfC)
+        int hE = storedHtfTime + (timeframe.in_seconds(dH) * 1000)
+        if doCheckBullish
+            bullTspotBox1 := box.new(storedHtfTime, bTop, hE, bBot, xloc=xloc.bar_time, bgcolor=box1BullColor, border_color=na, text="Bull T-Spot" + (lbl != "body" ? " [" + lbl + "]" : ""), text_size=size.small, text_halign=text.align_right, text_color=color.white)
+        if doCheckBearish
+            bearTspotBox1 := box.new(storedHtfTime, beTop, hE, beBot, xloc=xloc.bar_time, bgcolor=box1BearColor, border_color=na, text="Bear T-Spot" + (lbl != "body" ? " [" + lbl + "]" : ""), text_size=size.small, text_halign=text.align_right, text_color=color.white)
+
+mitigateFairValueGaps()
+mitigateSwings()
+mitigateCisds()
+
+// ================================================================= //
+//                       ALERT CONDITIONS                            //
+// ================================================================= //
+
+if barstate.isconfirmed
+    string signalType = "None"
+    if signalC2Bull
+        signalType := "BULLISH C2"
+    else if signalC3Bull
+        signalType := "BULLISH C3"
+    else if signalC2Bear
+        signalType := "BEARISH C2"
+    else if signalC3Bear
+        signalType := "BEARISH C3"
+    if signalType != "None"
+        string alertTfLabel = timeframe.period
+        bool isBull = (signalType == "BULLISH C2" or signalType == "BULLISH C3")
+        string readableMsg = (isBull ? "🟢 " : "🔴 ") + signalType + " on " + syminfo.ticker + " [" + alertTfLabel + "]"
+        string json = "{" +
+             "\"message\": \""   + readableMsg + "\"," +
+             "\"ticker\": \""    + syminfo.ticker + "\"," +
+             "\"timeframe\": \"" + alertTfLabel + "\"," +
+             "\"signal\": \""    + signalType + "\"," +
+             "\"time_utc\": \""  + str.format("{0,date,yyyy-MM-dd HH:mm:ss}", time) + "\"," +
+             "\"candle_signal\": {" +
+                 "\"o\": " + str.tostring(open) + "," +
+                 "\"h\": " + str.tostring(high) + "," +
+                 "\"l\": " + str.tostring(low)  + "," +
+                 "\"c\": " + str.tostring(close) +
+             "}" +
+             "}"
+        alert(json, alert.freq_once_per_bar_close)
+
+    string cisdSignalType = "None"
+    if signalCisdBull
+        cisdSignalType := "BULLISH CISD"
+    else if signalCisdBear
+        cisdSignalType := "BEARISH CISD"
+    if cisdSignalType != "None"
+        string alertTfLabel = timeframe.period
+        bool isBull = signalCisdBull
+        string readableMsg = (isBull ? "🟢 " : "🔴 ") + cisdSignalType + " on " + syminfo.ticker + " [" + alertTfLabel + "]"
+        string json = "{" +
+             "\"message\": \""   + readableMsg + "\"," +
+             "\"ticker\": \""    + syminfo.ticker + "\"," +
+             "\"timeframe\": \"" + alertTfLabel + "\"," +
+             "\"signal\": \""    + cisdSignalType + "\"," +
+             "\"time_utc\": \""  + str.format("{0,date,yyyy-MM-dd HH:mm:ss}", time) + "\"," +
+             "\"candle_signal\": {" +
+                 "\"o\": " + str.tostring(open) + "," +
+                 "\"h\": " + str.tostring(high) + "," +
+                 "\"l\": " + str.tostring(low)  + "," +
+                 "\"c\": " + str.tostring(close) +
+             "}" +
+             "}"
+        alert(json, alert.freq_once_per_bar_close)
+
+alertcondition(barstate.isconfirmed and (signalC2Bull or signalC3Bull or signalC2Bear or signalC3Bear),
+     title="C2/C3 Signal",
+     message="C2/C3 on {{ticker}} [{{interval}}] — O:{{open}} H:{{high}} L:{{low}} C:{{close}}")
+
+alertcondition(barstate.isconfirmed and (signalCisdBull or signalCisdBear),
+     title="CISD Signal",
+     message="CISD on {{ticker}} [{{interval}}] — O:{{open}} H:{{high}} L:{{low}} C:{{close}}")
