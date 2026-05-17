@@ -67,6 +67,27 @@ class CouchDBService:
         
         return await self._save_document(self._bias_url, payload, COUCHDB_BIAS_DB)
 
+    async def update_narrative_confirmation(self, date_str: str, asset: str, confirmed: bool) -> bool:
+        """Update the narrative confirmation state for a specific asset on a given date."""
+        existing = await self.get_bias_by_date(date_str)
+        if not existing:
+            return False
+            
+        if "narrative_confirmed" not in existing:
+            existing["narrative_confirmed"] = {}
+            
+        existing["narrative_confirmed"][asset] = confirmed
+        
+        # update document
+        url = f"{self._bias_url}/{date_str}"
+        session = await self._get_session()
+        try:
+            async with session.put(url, json=existing) as resp:
+                return resp.status in [201, 202]
+        except Exception as e:
+            print(f"❌ CouchDB narrative update error: {e}")
+        return False
+
     async def get_bias_by_date(self, date_str: str):
         """Fetch bias for a specific date (YYYY-MM-DD)."""
         session = await self._get_session()

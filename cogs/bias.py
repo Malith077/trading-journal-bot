@@ -54,9 +54,10 @@ class BiasView(discord.ui.View):
 
     @discord.ui.select(placeholder="Select Asset to Update", min_values=1, max_values=1, custom_id="bias_asset_select")
     async def asset_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.defer()
         self.selected_asset = select.values[0]
         self._update_select_options()
-        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+        await interaction.edit_original_response(embed=self.create_embed(), view=self)
 
     @discord.ui.button(label="Bullish", style=discord.ButtonStyle.success, emoji="🟢", custom_id="bias_bullish")
     async def bullish_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -71,6 +72,7 @@ class BiasView(discord.ui.View):
         await self._update_bias(interaction, "Neutral")
 
     async def _update_bias(self, interaction: discord.Interaction, bias: str):
+        await interaction.response.defer()
         self.state[self.selected_asset] = bias
         # Save to CouchDB
         now = datetime.datetime.now(ZoneInfo("Australia/Melbourne"))
@@ -80,7 +82,7 @@ class BiasView(discord.ui.View):
             "updated_at": now.isoformat()
         }
         await couchdb_service.save_bias(payload)
-        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+        await interaction.edit_original_response(embed=self.create_embed(), view=self)
 
 
 class Bias(commands.Cog):
