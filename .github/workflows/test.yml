@@ -1,13 +1,6 @@
 name: Run Tests
 
-on:
-  push:
-    branches:
-      - '**'        # Matches every branch
-      - '!main'     # Exclude main (since deploy.yml already tests main)
-  pull_request:
-    branches:
-      - main
+on: [push, pull_request]
 
 jobs:
   test:
