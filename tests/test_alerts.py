@@ -3,7 +3,7 @@ Unit tests for cogs/alerts.py
 """
 import pytest
 import discord
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, ANY
 from cogs.alerts import Alerts
 from services.couchdb_service import couchdb_service
 
@@ -35,6 +35,8 @@ class TestAlertsCog:
     @pytest.fixture
     def cog(self, bot):
         couchdb_service.save_alert = AsyncMock()
+        # Mock default bias so baseline tests don't drop the alert and colors remain default
+        couchdb_service.get_bias_by_date = AsyncMock(return_value={"biases": {"ES": "Bullish", "GC": "Bearish"}, "narrative_confirmed": {"ES": True, "GC": True}})
         return Alerts(bot)
 
     @pytest.fixture
@@ -60,7 +62,7 @@ class TestAlertsCog:
 
     @pytest.mark.asyncio
     async def test_bearish_signal_red_embed(self, cog, alerts_channel):
-        payload = {**SAMPLE_ALERT, "signal": "BEARISH CISD", "message": "🔴 BEARISH CISD on GC [15]"}
+        payload = {**SAMPLE_ALERT, "ticker": "GC", "signal": "BEARISH CISD", "message": "🔴 BEARISH CISD on GC [15]"}
         await cog.on_tradingview_alert(payload)
 
         embed = alerts_channel.send.call_args.kwargs["embed"]
@@ -73,7 +75,8 @@ class TestAlertsCog:
         await cog.on_tradingview_alert(payload)
 
         embed = alerts_channel.send.call_args.kwargs["embed"]
-        assert embed.color == discord.Color.greyple()
+        # Neutral signal opposes Bullish bias, so it gets the warning color
+        assert embed.color == discord.Color.orange()
         assert "⚪" in embed.title
 
     @pytest.mark.asyncio
@@ -130,7 +133,9 @@ class TestAlertsCog:
     @pytest.mark.asyncio
     async def test_missing_fields_handled(self, cog, alerts_channel):
         minimal = {"signal": "BULLISH C2"}
-        await cog.on_tradingview_alert(minimal)
+        # Ticker becomes N/A, so we must mock N/A as Bullish
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value={"biases": {"N/A": "Bullish"}})):
+            await cog.on_tradingview_alert(minimal)
 
         alerts_channel.send.assert_called_once()
         embed = alerts_channel.send.call_args.kwargs["embed"]
@@ -139,7 +144,8 @@ class TestAlertsCog:
     @pytest.mark.asyncio
     async def test_channel_not_found_no_error(self, cog, bot):
         bot.guilds[0].text_channels = []
-        await cog.on_tradingview_alert(SAMPLE_ALERT)
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value={"biases": {"N/A": "Bullish"}})):
+            await cog.on_tradingview_alert(SAMPLE_ALERT)
 
     @pytest.mark.asyncio
     async def test_multiple_guilds_sends_to_all(self, cog, bot):
@@ -174,3 +180,78 @@ class TestAlertsCog:
         couchdb_service.save_alert = AsyncMock()
         await cog.on_tradingview_alert(SAMPLE_ALERT)
         couchdb_service.save_alert.assert_called_once_with(SAMPLE_ALERT)
+
+    @pytest.mark.asyncio
+    async def test_context_narrative_confirmed(self, cog, alerts_channel):
+        payload = {**SAMPLE_ALERT, "timeframe": "60", "signal": "BULLISH CISD"}
+        bias_data = {"biases": {"ES": "Bullish"}, "narrative_confirmed": {"ES": False}}
+        
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value=bias_data)):
+            with patch("cogs.alerts.couchdb_service.update_narrative_confirmation", AsyncMock()) as mock_update:
+                await cog.on_tradingview_alert(payload)
+                
+                embed = alerts_channel.send.call_args.kwargs["embed"]
+                context_field = next(f for f in embed.fields if f.name == "🧠 Contextual Analysis")
+                assert "NARRATIVE CONFIRMED" in context_field.value
+                assert "⭐⭐⭐" in context_field.value
+                mock_update.assert_called_once_with(ANY, "ES", True)
+
+    @pytest.mark.asyncio
+    async def test_context_high_probability_entry(self, cog, alerts_channel):
+        payload = {**SAMPLE_ALERT, "timeframe": "5", "signal": "BULLISH C2"}
+        bias_data = {"biases": {"ES": "Bullish"}, "narrative_confirmed": {"ES": True}}
+        
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value=bias_data)):
+            await cog.on_tradingview_alert(payload)
+            
+            embed = alerts_channel.send.call_args.kwargs["embed"]
+            context_field = next(f for f in embed.fields if f.name == "🧠 Contextual Analysis")
+            assert "HIGH PROBABILITY ENTRY" in context_field.value
+            assert "⭐⭐⭐" in context_field.value
+
+    @pytest.mark.asyncio
+    async def test_context_caution_unconfirmed_narrative(self, cog, alerts_channel):
+        payload = {**SAMPLE_ALERT, "timeframe": "5", "signal": "BULLISH C2"}
+        bias_data = {"biases": {"ES": "Bullish"}, "narrative_confirmed": {"ES": False}}
+        
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value=bias_data)):
+            await cog.on_tradingview_alert(payload)
+            
+            embed = alerts_channel.send.call_args.kwargs["embed"]
+            assert embed.color == discord.Color.orange()
+            context_field = next(f for f in embed.fields if f.name == "🧠 Contextual Analysis")
+            assert "CAUTION" in context_field.value
+            assert "⭐⭐" in context_field.value
+
+    @pytest.mark.asyncio
+    async def test_context_counter_trend(self, cog, alerts_channel):
+        payload = {**SAMPLE_ALERT, "timeframe": "5", "signal": "BEARISH C2"}
+        bias_data = {"biases": {"ES": "Bullish"}, "narrative_confirmed": {"ES": True}}
+        
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value=bias_data)):
+            await cog.on_tradingview_alert(payload)
+            
+            embed = alerts_channel.send.call_args.kwargs["embed"]
+            assert embed.color == discord.Color.orange()
+            context_field = next(f for f in embed.fields if f.name == "🧠 Contextual Analysis")
+            assert "COUNTER-TREND" in context_field.value
+            assert "⭐" in context_field.value
+
+    @pytest.mark.asyncio
+    async def test_context_no_bias_set_drops_alert(self, cog, alerts_channel):
+        payload = {**SAMPLE_ALERT}
+        bias_data = {"biases": {"ES": "Neutral"}, "narrative_confirmed": {"ES": False}}
+        
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value=bias_data)):
+            await cog.on_tradingview_alert(payload)
+            
+            alerts_channel.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_bias_data_drops_alert(self, cog, alerts_channel):
+        payload = {**SAMPLE_ALERT}
+        
+        with patch("cogs.alerts.couchdb_service.get_bias_by_date", AsyncMock(return_value=None)):
+            await cog.on_tradingview_alert(payload)
+            
+            alerts_channel.send.assert_not_called()
