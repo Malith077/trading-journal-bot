@@ -308,7 +308,8 @@ class TestBiasCog:
         cog.bot = bot
         cog.bias_reset_task = MagicMock()
 
-        with patch.object(cog, "send_new_bias_prompt", new_callable=AsyncMock) as mock_send:
+        with patch("cogs.bias.is_trading_day", return_value=True), \
+             patch.object(cog, "send_new_bias_prompt", new_callable=AsyncMock) as mock_send:
             await Bias.bias_reset_task.coro(cog)
             mock_send.assert_called_once_with(channel)
 
@@ -321,6 +322,24 @@ class TestBiasCog:
         cog = Bias.__new__(Bias)
         cog.bot = bot
 
-        with patch.object(cog, "send_new_bias_prompt", new_callable=AsyncMock) as mock_send:
+        with patch("cogs.bias.is_trading_day", return_value=True), \
+             patch.object(cog, "send_new_bias_prompt", new_callable=AsyncMock) as mock_send:
+            await Bias.bias_reset_task.coro(cog)
+            mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bias_reset_task_skips_on_weekend(self, bot):
+        """No bias prompt is sent when it's not a trading day."""
+        guild = MagicMock()
+        channel = AsyncMock()
+        channel.name = "trading_bias"
+        guild.text_channels = [channel]
+        bot.guilds = [guild]
+
+        cog = Bias.__new__(Bias)
+        cog.bot = bot
+
+        with patch("cogs.bias.is_trading_day", return_value=False), \
+             patch.object(cog, "send_new_bias_prompt", new_callable=AsyncMock) as mock_send:
             await Bias.bias_reset_task.coro(cog)
             mock_send.assert_not_called()
