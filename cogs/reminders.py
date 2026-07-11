@@ -7,6 +7,7 @@ from pathlib import Path
 from discord import app_commands
 from discord.ext import commands, tasks
 from config import REMINDER_CHANNEL_ID, REMINDER_TIME, INSIGHTS_PATH, KB_DIR
+from services.schedule_utils import is_trading_day
 
 class Reminders(commands.Cog):
     def __init__(self, bot):
@@ -18,6 +19,13 @@ class Reminders(commands.Cog):
 
     @tasks.loop(time=REMINDER_TIME)
     async def daily_reminder(self):
+        # Skip weekends — no scheduled morning prep when markets are closed.
+        # (Manual /morning_prep bypasses this via _send_reminder.)
+        if not is_trading_day():
+            return
+        await self._send_reminder()
+
+    async def _send_reminder(self):
         channel = self.bot.get_channel(REMINDER_CHANNEL_ID)
         if not channel: return
 
@@ -66,7 +74,7 @@ class Reminders(commands.Cog):
     async def morning_prep(self, interaction: discord.Interaction):
         """Manually trigger today's morning trading prep reminder."""
         await interaction.response.send_message("🎲 Shuffling your history...")
-        await self.daily_reminder()
+        await self._send_reminder()
 
 async def setup(bot):
     await bot.add_cog(Reminders(bot))

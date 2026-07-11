@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from zoneinfo import ZoneInfo
 from config import BIAS_CHANNEL_NAME, BIAS_ASSETS, BIAS_RESET_TIME
 from services.couchdb_service import couchdb_service
+from services.schedule_utils import is_trading_day
 
 
 class BiasView(discord.ui.View):
@@ -95,7 +96,13 @@ class Bias(commands.Cog):
 
     @tasks.loop(time=BIAS_RESET_TIME)
     async def bias_reset_task(self):
-        """Triggered daily at 7 AM AEST to post a fresh bias prompt."""
+        """Triggered at 7 AM AEST on weekdays to post a fresh bias prompt.
+
+        Weekends are skipped; use /bias to trigger manually if ever needed.
+        """
+        if not is_trading_day():
+            print("💤 Weekend — skipping scheduled bias reset.")
+            return
         print("⏰ 7 AM AEST: Resetting trading bias...")
         for guild in self.bot.guilds:
             channel = discord.utils.get(guild.text_channels, name=BIAS_CHANNEL_NAME)

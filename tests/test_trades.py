@@ -72,7 +72,9 @@ class TestTradesCog:
     @pytest.fixture
     def bot(self):
         bot = MagicMock()
-        bot.loop = asyncio.get_event_loop()
+        # A MagicMock loop is enough: tests that exercise create_task mock it.
+        # (Avoids asyncio.get_event_loop(), which raises on Python 3.12+.)
+        bot.loop = MagicMock()
         return bot
 
     @pytest.fixture
@@ -387,7 +389,8 @@ class TestAutoSync:
     @pytest.fixture
     def bot(self):
         bot = MagicMock()
-        bot.loop = asyncio.get_event_loop()
+        # MagicMock loop avoids asyncio.get_event_loop() (raises on Python 3.12+).
+        bot.loop = MagicMock()
         bot.loop.create_task = MagicMock()
         return bot
 

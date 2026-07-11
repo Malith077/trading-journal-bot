@@ -97,12 +97,36 @@ class TestRemindersCog:
         # No crash when files don't exist
         assert not insights.exists()
 
+    # --- weekday gating ---
+
+    @pytest.mark.asyncio
+    async def test_daily_reminder_skips_on_weekend(self, bot):
+        """Scheduled reminder does nothing when it's not a trading day."""
+        cog = Reminders.__new__(Reminders)
+        cog.bot = bot
+        with patch("cogs.reminders.is_trading_day", return_value=False), \
+             patch.object(cog, "_send_reminder", new_callable=AsyncMock) as mock_send:
+            await Reminders.daily_reminder.coro(cog)
+            mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_daily_reminder_runs_on_weekday(self, bot):
+        """Scheduled reminder sends on a trading day."""
+        cog = Reminders.__new__(Reminders)
+        cog.bot = bot
+        with patch("cogs.reminders.is_trading_day", return_value=True), \
+             patch.object(cog, "_send_reminder", new_callable=AsyncMock) as mock_send:
+            await Reminders.daily_reminder.coro(cog)
+            mock_send.assert_called_once()
+
     # --- morning_prep ---
 
     @pytest.mark.asyncio
     async def test_morning_prep(self, cog, interaction):
-        """morning_prep sends message and triggers daily_reminder."""
+        """morning_prep sends message and triggers the reminder body directly
+        (bypassing the weekday guard so manual runs always work)."""
+        cog._send_reminder = AsyncMock()
         await cog.morning_prep.callback(cog, interaction)
         interaction.response.send_message.assert_called_once()
         assert "Shuffling" in interaction.response.send_message.call_args[0][0]
-        cog.daily_reminder.assert_called_once()
+        cog._send_reminder.assert_called_once()
