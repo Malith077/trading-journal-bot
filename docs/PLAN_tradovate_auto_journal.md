@@ -24,15 +24,19 @@ This complements the existing flow:
    `sec`. Note your `appId` / `appVersion` strings.
 2. Decide environment: **demo** (`demo.tradovateapi.com`) first, then **live**
    (`live.tradovateapi.com`). Build and test against demo.
-3. Add secrets to `.env` (never commit):
+3. Generate a stable `deviceId` **once** (a UUID) and keep it fixed — it must
+   permanently identify this device (needed for 2FA-enabled apps). Do not
+   regenerate per request.
+4. Add secrets to `.env` (never commit):
    ```
    TRADOVATE_ENV=demo            # demo | live
-   TRADOVATE_USERNAME=...
+   TRADOVATE_USERNAME=...        # account login -> body "name"
    TRADOVATE_PASSWORD=...
    TRADOVATE_APP_ID=FractalJournal
    TRADOVATE_APP_VERSION=1.0
-   TRADOVATE_CID=...
-   TRADOVATE_SEC=...
+   TRADOVATE_CID=8               # API key id (integer)
+   TRADOVATE_SEC=...             # API key secret (UUID)
+   TRADOVATE_DEVICE_ID=...       # generate once, keep stable
    ```
 
 ---
@@ -42,12 +46,23 @@ This complements the existing flow:
 Mirror the shape of `services/couchdb_service.py` (async, singleton, shared
 `aiohttp` session).
 
-- **Auth:** `POST /auth/accessTokenRequest` with
-  `{name, password, appId, appVersion, cid, sec}` → returns `accessToken` +
-  `expirationTime` (~80 min). Cache token + expiry; auto-renew via
-  `POST /auth/renewAccessToken` before expiry. All calls send
-  `Authorization: Bearer <accessToken>`.
-- **Base URL** derived from `TRADOVATE_ENV`.
+- **Base URL** derived from `TRADOVATE_ENV`
+  (`https://demo.tradovateapi.com/v1` or `.../live...`).
+- **Auth:** `POST /auth/accesstokenrequest` (JSON) with
+  `{name, password, appId, appVersion, cid, sec, deviceId}` → returns
+  `accessToken` + `expirationTime` (+ `userId`, `hasLive`, …). All authed calls
+  send `Authorization: Bearer <accessToken>`.
+  - **Token lifespan: 90 min.** Cache the token + expiry and **renew** via
+    `GET /auth/renewAccessToken` ~15 min before expiry.
+  - **Reuse one session — do NOT re-auth per poll.** Only **2 concurrent
+    sessions** are allowed; a 3rd closes the oldest. So a single long-lived
+    token, renewed on a timer, is the design.
+  - **Handle the time-penalty response** (applies to auth *and* any request):
+    a body containing `p-ticket` / `p-time` / `p-captcha` (still HTTP 200) means
+    throttled. Wait `p-time` seconds, then retry with `p-ticket` added to the
+    original body. If `p-captcha` is present, a bot can't continue — back off
+    ~1 hour. Centralise this in the request wrapper so every call inherits it.
+  - `mdAccessToken` (market-data feed) is **not** needed for fills/journaling.
 - **Methods (confirm entity names in docs):**
   - `get_fill_pairs(since_id)` — `fillPair` entities pair an entry+exit with
     realized P&L. This is the cleanest "one closed trade = one row with W/L"
@@ -59,7 +74,8 @@ Mirror the shape of `services/couchdb_service.py` (async, singleton, shared
 
 **Deliverable:** unit tests with mocked `aiohttp` (follow
 `tests/test_couchdb_service.py`). Cover: token fetch, renewal-before-expiry,
-401 → re-auth retry, fill-pair parsing.
+401 → re-auth retry, **p-ticket time-penalty retry** (wait + resubmit with
+ticket) and **p-captcha back-off**, fill-pair parsing.
 
 ---
 
