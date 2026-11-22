@@ -1,17 +1,20 @@
 import discord
 import json
 import asyncio
+import shutil
+import datetime
 import re
 import aiofiles
 from pathlib import Path
 from discord import app_commands
 from discord.ext import commands
 from discord import ui
-from services.json_utils import extract_json as _extract_json
+from services.json_utils import extract_json as _extract_json, write_json_atomic
 from services.llm_service import llm_service, LLMError, encode_image_file
 from services import psych_service as ps
 from services.guild_guard import is_allowed_guild
 from config import (
+    BACKUPS_DIR,
     DEEPSEEK_JOURNAL_EFFORT,
     TRADES_DIR,
     INSIGHTS_PATH,
@@ -23,6 +26,10 @@ from config import (
 FAILED_TRADES_PATH = Path.cwd() / "failed_trades.json"
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds between retries
+
+# Rough DeepSeek cost per journal message (flash, reasoning off, ~1 chart),
+# off-peak. Used only for the estimate shown before /reanalyze_trades.
+EST_COST_PER_MESSAGE = 0.0005
 
 
 EMPTY_TRADE_INSIGHTS = {"good_habits": [], "mistakes": []}
@@ -235,11 +242,52 @@ class ChecklistView(ui.View):
         return callback
 
 
+def dedupe_insights(master_data: dict) -> dict:
+    """Drop exact duplicates while keeping first-seen order."""
+    return {k: list(dict.fromkeys(master_data.get(k, []))) for k in ("good_habits", "mistakes")}
+
+
+class ReanalyzeConfirmView(ui.View):
+    """Explicit go/no-go before resetting insights — only the invoker may press."""
+
+    def __init__(self, cog: "Trades", author_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the person who ran `/reanalyze_trades` can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    def _disable(self):
+        for child in self.children:
+            child.disabled = True
+
+    @ui.button(label="Re-analyse everything", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: ui.Button):
+        self._disable()
+        await interaction.response.edit_message(view=self)
+        self.stop()
+        await self.cog._start_reanalysis(interaction)
+
+    @ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+        self._disable()
+        await interaction.response.edit_message(content="Cancelled — nothing was changed.", view=self)
+        self.stop()
+
+
 class Trades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Auto-sync debounce: guild_id → asyncio.Task
         self._pending_sync: dict[int, asyncio.Task] = {}
+        # Only one analysis run may hold master_insights.json at a time; two
+        # concurrent runs each rewrite it and the last one to finish wins.
+        self._analysis_running = False
 
     # --- Multi-Category Helper ---
 
@@ -476,7 +524,122 @@ class Trades(commands.Cog):
             pass # Handle AutoInteraction case
         await self._do_analyze_trades(interaction)
 
+    @app_commands.command(name="reanalyze_trades",
+                          description="Re-sync every trade and re-run all of them through the AI from scratch.")
+    @app_commands.default_permissions(administrator=True)
+    async def reanalyze_trades(self, interaction: discord.Interaction):
+        """Sync, show what a full re-run would cost, and wait for confirmation."""
+        await interaction.response.defer()
+        if self._analysis_running:
+            await interaction.followup.send("⏳ An analysis run is already in progress. Try again once it finishes.")
+            return
+
+        await self._do_sync_fractals(interaction.guild, interaction.followup.send)
+        if not TRADES_DIR.exists():
+            return
+
+        trades, duplicates = await self._collect_trades(0)
+        if not trades:
+            await interaction.followup.send("📭 No trade messages found to analyse.")
+            return
+
+        n_images = sum(len(t.get("images", [])) for t in trades)
+        est = len(trades) * EST_COST_PER_MESSAGE
+
+        embed = discord.Embed(
+            title="🔁 Re-analyse every trade?",
+            description=(f"Sync finished. This runs every trade message back through "
+                         f"`{llm_service.model_for(images=True)}`."),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="What happens", value=(
+            "1. `master_insights.json` and `last_analyzed.txt` are copied to `backups/`\n"
+            "2. Both are reset to empty\n"
+            f"3. **{len(trades)}** messages (**{n_images}** charts) are analysed from scratch"
+        ), inline=False)
+        embed.add_field(name="Rough cost", value=(
+            f"~${est:.2f} off-peak, ~${est * 2:.2f} at peak (01:00–04:00 and 06:00–10:00 UTC, weekdays)\n"
+            "Estimate only."
+        ), inline=False)
+        if duplicates:
+            embed.add_field(name="🗂️ Stale folders", value=(
+                f"{duplicates} message(s) also appear in leftover folders from renamed channels. "
+                "Each message is analysed once."
+            ), inline=False)
+        embed.add_field(name="If it's interrupted", value=(
+            "Insights are saved after every trade. Run `/analyze_trades` to resume where it stopped."
+        ), inline=False)
+
+        await interaction.followup.send(embed=embed, view=ReanalyzeConfirmView(self, interaction.user.id))
+
+    async def _backup_analysis_state(self) -> list[Path]:
+        """Copy the current insights and tracker into backups/ with a timestamp."""
+        BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        saved = []
+        for src in (INSIGHTS_PATH, TRACKER_PATH):
+            if src.exists():
+                dest = BACKUPS_DIR / f"{src.stem}-{stamp}{src.suffix}"
+                shutil.copy2(src, dest)
+                saved.append(dest)
+        return saved
+
+    async def _start_reanalysis(self, interaction: discord.Interaction):
+        """Back up, reset, then hand over to the normal analysis path."""
+        if self._analysis_running:
+            await interaction.followup.send("⏳ An analysis run is already in progress.")
+            return
+
+        saved = await self._backup_analysis_state()
+        await write_json_atomic(INSIGHTS_PATH, {"good_habits": [], "mistakes": []})
+        async with aiofiles.open(TRACKER_PATH, "w") as f:
+            await f.write("0")
+        async with aiofiles.open(FAILED_TRADES_PATH, "w", encoding="utf-8") as f:
+            await f.write("[]")
+
+        backed_up = ", ".join(f"`backups/{p.name}`" for p in saved) or "nothing to back up"
+        await interaction.followup.send(f"💾 Backed up: {backed_up}. Insights reset — starting the re-run.")
+        await self._do_analyze_trades(interaction)
+
+    async def _collect_trades(self, last_id: int) -> tuple[list[dict], int]:
+        """
+        Gather history entries newer than `last_id`, one per message id.
+
+        A renamed channel leaves its old folder behind (sync never deletes), so
+        the same message can appear in two history.json files. Keep the copy
+        from the most recently written file — the live channel is rewritten on
+        every sync, the stale folder never is. Returns (entries, duplicates).
+        """
+        by_id: dict[int, tuple[float, dict]] = {}
+        duplicates = 0
+        for channel_dir in TRADES_DIR.iterdir():
+            history_file = channel_dir / "history.json"
+            if not (channel_dir.is_dir() and history_file.exists()):
+                continue
+            mtime = history_file.stat().st_mtime
+            try:
+                async with aiofiles.open(history_file, "r", encoding="utf-8") as f:
+                    channel_data = json.loads(await f.read())
+            except (json.JSONDecodeError, OSError):
+                continue
+            for entry in channel_data:
+                mid = int(entry["message_id"])
+                if mid <= last_id:
+                    continue
+                entry["_folder_path"] = str(channel_dir)
+                if mid in by_id:
+                    duplicates += 1
+                    if mtime <= by_id[mid][0]:
+                        continue
+                by_id[mid] = (mtime, entry)
+        return [entry for _, entry in by_id.values()], duplicates
+
     async def _do_analyze_trades(self, interaction):
+        if self._analysis_running:
+            await interaction.followup.send(
+                "⏳ An analysis run is already in progress. New trades will be picked up by the next run.")
+            return
+
         if not TRADES_DIR.exists():
             await interaction.followup.send("❌ No trades directory found. Run `/sync_fractals` first.")
             return
@@ -488,17 +651,7 @@ class Trades(commands.Cog):
             if content.isdigit():
                 last_id = int(content)
 
-        new_trades = []
-        for channel_dir in TRADES_DIR.iterdir():
-            if channel_dir.is_dir():
-                history_file = channel_dir / "history.json"
-                if history_file.exists():
-                    async with aiofiles.open(history_file, "r", encoding="utf-8") as f:
-                        channel_data = json.loads(await f.read())
-                        for entry in channel_data:
-                            if int(entry["message_id"]) > last_id:
-                                entry["_folder_path"] = str(channel_dir)
-                                new_trades.append(entry)
+        new_trades, duplicates = await self._collect_trades(last_id)
 
         retry_trades = []
         if FAILED_TRADES_PATH.exists():
@@ -511,7 +664,11 @@ class Trades(commands.Cog):
                 retry_trades = []
 
         new_trades.sort(key=lambda x: int(x["message_id"]))
+        fresh_ids = {int(t["message_id"]) for t in new_trades}
+        retry_trades = [t for t in retry_trades if int(t["message_id"]) not in fresh_ids]
         all_trades = retry_trades + new_trades
+        if duplicates:
+            print(f"[analyze] skipped {duplicates} duplicate message(s) from stale channel folders")
 
         if not all_trades:
             await interaction.followup.send("✅ Master Insights is already up to date!")
@@ -520,10 +677,23 @@ class Trades(commands.Cog):
         async with aiofiles.open(FAILED_TRADES_PATH, "w", encoding="utf-8") as f:
             await f.write("[]")
 
+        self._analysis_running = True
         self.bot.loop.create_task(self.run_analysis_loop(interaction, all_trades, last_id))
         await interaction.followup.send(f"🚀 Found **{len(all_trades)}** trade(s) to process. Starting background analysis...")
 
     async def run_analysis_loop(self, interaction, all_trades, last_id):
+        """Run the analysis, always releasing the single-run lock afterwards."""
+        self._analysis_running = True
+        try:
+            await self._run_analysis(interaction, all_trades, last_id)
+        finally:
+            self._analysis_running = False
+
+    async def _run_analysis(self, interaction, all_trades, last_id, before_each=None):
+        """
+        `before_each`, if given, is awaited before every model call. The full
+        rebuild uses it to sit out DeepSeek's peak hours mid-run.
+        """
         total_trades = len(all_trades)
         success_count = 0
         fallback_count = 0
@@ -535,6 +705,7 @@ class Trades(commands.Cog):
                     master_data = json.loads(await f.read())
             except Exception:
                 pass
+        master_data = dedupe_insights(master_data)
 
         status_msg = await interaction.followup.send(
             f"🧪 Initializing analysis via `{llm_service.model_for(images=True)}`..."
@@ -592,6 +763,8 @@ Respond STRICTLY in valid JSON format with no extra text:
 
             parsed = None
             last_error = None
+            if before_each:
+                await before_each()
 
             # Retries, timeouts and provider differences live in llm_service.
             try:
@@ -616,7 +789,10 @@ Respond STRICTLY in valid JSON format with no extra text:
                 print(f"Trade {trade_id} exhausted all {MAX_RETRIES} retries ({last_error}). Using empty fallback.")
                 fallback_count += 1
 
-            # Always advance tracker regardless of outcome
+            # Save insights first, then advance the tracker. If the process dies
+            # between the two, the trade is re-analysed next run (harmless,
+            # deduped) instead of being marked done with its insights lost.
+            await write_json_atomic(INSIGHTS_PATH, dedupe_insights(master_data))
             if trade_id > highest_id:
                 highest_id = trade_id
                 async with aiofiles.open(TRACKER_PATH, "w") as f:
@@ -624,11 +800,8 @@ Respond STRICTLY in valid JSON format with no extra text:
 
             await asyncio.sleep(0.5)
 
-        master_data["good_habits"] = list(set(master_data["good_habits"]))
-        master_data["mistakes"] = list(set(master_data["mistakes"]))
-
-        async with aiofiles.open(INSIGHTS_PATH, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(master_data, indent=4, ensure_ascii=False))
+        master_data = dedupe_insights(master_data)
+        await write_json_atomic(INSIGHTS_PATH, master_data)
 
         async with aiofiles.open(FAILED_TRADES_PATH, "w", encoding="utf-8") as f:
             await f.write("[]")

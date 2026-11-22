@@ -39,6 +39,8 @@ jobs:
             --exclude 'downloads/' \
             --exclude 'knowledge_base/' \
             --exclude 'chroma_db/' \
+            --exclude 'backups/' \
+            --exclude 'rebuild_state.json' \
             --exclude 'master_insights.json' \
             --exclude 'last_analyzed.txt' \
             --exclude 'missed_insights.json' \

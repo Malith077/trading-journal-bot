@@ -17,3 +17,6 @@ __pycache__/
 chroma_db/
 coach_log.jsonl
 coach_settings.json
+backups/
+*.tmp
+rebuild_state.json

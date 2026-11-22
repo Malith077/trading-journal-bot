@@ -88,6 +88,15 @@ CHECKLIST_PATH = BASE_DIR / "trade_checklist.json"
 MISSED_DIR = BASE_DIR / "downloads" / "Missed_Trades"
 MISSED_INSIGHTS_PATH = BASE_DIR / "missed_insights.json"
 MISSED_TRACKER_PATH = BASE_DIR / "last_missed_analyzed.txt"
+# Snapshots taken before destructive operations such as /reanalyze_trades.
+BACKUPS_DIR = BASE_DIR / "backups"
+# Persisted schedule/progress for /rebuild_all, so a restart (every deploy is
+# one) resumes the rebuild instead of silently dropping it.
+REBUILD_STATE_PATH = BASE_DIR / "rebuild_state.json"
+# DeepSeek charges 2x during these UTC hours, Monday-Friday; weekends are
+# off-peak all day. [start, end) in whole hours.
+# Source: https://api-docs.deepseek.com/quick_start/pricing
+DEEPSEEK_PEAK_HOURS_UTC = [(1, 4), (6, 10)]
 # --- Trading Psychology (Denise Shull / ReThink method) ---
 # Standalone emotional check-ins, appended one JSON object per line.
 PSYCH_LOG_PATH = BASE_DIR / "psych_log.jsonl"

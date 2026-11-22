@@ -5,8 +5,10 @@ Models are asked for strict JSON but don't always comply, so extraction is
 deliberately forgiving. Shared by every cog that asks an LLM for structured
 output.
 """
+import os
 import re
 import json
+from pathlib import Path
 
 
 def extract_json(raw: str, fallback: dict) -> dict:
@@ -53,3 +55,17 @@ def extract_json(raw: str, fallback: dict) -> dict:
 
     print(f"[WARN] Could not parse JSON from model response. Using empty fallback.\nRaw: {(raw or '')[:300]}")
     return json.loads(json.dumps(fallback))  # deep copy — never alias the caller's constant
+
+
+async def write_json_atomic(path, data) -> None:
+    """
+    Write JSON via a temp file and rename, so a crash or restart mid-write can
+    never leave a half-written file behind. Used wherever insights are saved
+    incrementally during a long run.
+    """
+    import aiofiles
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(data, indent=4, ensure_ascii=False))
+    os.replace(tmp, path)

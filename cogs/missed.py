@@ -7,7 +7,7 @@ from pathlib import Path
 from discord import app_commands
 from discord.ext import commands
 from discord import ui
-from services.json_utils import extract_json as _extract_json
+from services.json_utils import extract_json as _extract_json, write_json_atomic
 from services.llm_service import llm_service, LLMError, encode_image_file
 from services import psych_service as ps
 from services.guild_guard import is_allowed_guild
@@ -209,6 +209,9 @@ class Missed(commands.Cog):
         self.bot = bot
         # Auto-sync debounce: guild_id → asyncio.Task
         self._pending_sync: dict[int, asyncio.Task] = {}
+        # One analysis run at a time — concurrent runs each rewrite
+        # missed_insights.json and the last to finish wins.
+        self._analysis_running = False
 
     # --- Multi-Category Helper ---
 
@@ -428,7 +431,42 @@ class Missed(commands.Cog):
             pass  # Handle AutoInteraction case
         await self._do_analyze_missed(interaction)
 
+    async def _collect_missed(self, last_id: int) -> tuple[list[dict], int]:
+        """
+        History entries newer than `last_id`, one per message id. A renamed
+        channel leaves a stale folder behind; the most recently written copy
+        (the live channel) wins. Returns (entries, duplicates).
+        """
+        by_id: dict[int, tuple[float, dict]] = {}
+        duplicates = 0
+        for channel_dir in MISSED_DIR.iterdir():
+            history_file = channel_dir / "history.json"
+            if not (channel_dir.is_dir() and history_file.exists()):
+                continue
+            mtime = history_file.stat().st_mtime
+            try:
+                async with aiofiles.open(history_file, "r", encoding="utf-8") as f:
+                    channel_data = json.loads(await f.read())
+            except (json.JSONDecodeError, OSError):
+                continue
+            for entry in channel_data:
+                mid = int(entry["message_id"])
+                if mid <= last_id:
+                    continue
+                entry["_folder_path"] = str(channel_dir)
+                if mid in by_id:
+                    duplicates += 1
+                    if mtime <= by_id[mid][0]:
+                        continue
+                by_id[mid] = (mtime, entry)
+        return [entry for _, entry in by_id.values()], duplicates
+
     async def _do_analyze_missed(self, interaction):
+        if self._analysis_running:
+            await interaction.followup.send(
+                "⏳ A missed-trade analysis is already in progress. New entries will be picked up by the next run.")
+            return
+
         if not MISSED_DIR.exists():
             await interaction.followup.send("❌ No missed trades directory found. Run `/sync_missed` first.")
             return
@@ -440,17 +478,7 @@ class Missed(commands.Cog):
             if content.isdigit():
                 last_id = int(content)
 
-        new_missed = []
-        for channel_dir in MISSED_DIR.iterdir():
-            if channel_dir.is_dir():
-                history_file = channel_dir / "history.json"
-                if history_file.exists():
-                    async with aiofiles.open(history_file, "r", encoding="utf-8") as f:
-                        channel_data = json.loads(await f.read())
-                        for entry in channel_data:
-                            if int(entry["message_id"]) > last_id:
-                                entry["_folder_path"] = str(channel_dir)
-                                new_missed.append(entry)
+        new_missed, _ = await self._collect_missed(last_id)
 
         retry_missed = []
         if FAILED_MISSED_PATH.exists():
@@ -463,6 +491,8 @@ class Missed(commands.Cog):
                 retry_missed = []
 
         new_missed.sort(key=lambda x: int(x["message_id"]))
+        fresh_ids = {int(m["message_id"]) for m in new_missed}
+        retry_missed = [m for m in retry_missed if int(m["message_id"]) not in fresh_ids]
         all_missed = retry_missed + new_missed
 
         if not all_missed:
@@ -472,6 +502,7 @@ class Missed(commands.Cog):
         async with aiofiles.open(FAILED_MISSED_PATH, "w", encoding="utf-8") as f:
             await f.write("[]")
 
+        self._analysis_running = True
         self.bot.loop.create_task(self.run_analysis_loop(interaction, all_missed, last_id))
         await interaction.followup.send(f"🚀 Found **{len(all_missed)}** missed trade(s) to process. Starting background analysis...")
 
@@ -519,6 +550,15 @@ Respond STRICTLY in valid JSON format with no extra text:
 {{"miss_reasons": ["..."], "setup_patterns": ["..."], "action_items": ["..."]}}"""
 
     async def run_analysis_loop(self, interaction, all_missed, last_id):
+        """Run the analysis, always releasing the single-run lock afterwards."""
+        self._analysis_running = True
+        try:
+            await self._run_analysis(interaction, all_missed, last_id)
+        finally:
+            self._analysis_running = False
+
+    async def _run_analysis(self, interaction, all_missed, last_id, before_each=None):
+        """`before_each`, if given, is awaited before every model call."""
         total_missed = len(all_missed)
         success_count = 0
         fallback_count = 0
@@ -562,6 +602,8 @@ Respond STRICTLY in valid JSON format with no extra text:
 
             parsed = None
             last_error = None
+            if before_each:
+                await before_each()
 
             # Retries, timeouts and provider differences live in llm_service.
             try:
@@ -586,7 +628,10 @@ Respond STRICTLY in valid JSON format with no extra text:
                 print(f"Missed trade {missed_id} exhausted all {MAX_RETRIES} retries ({last_error}). Using empty fallback.")
                 fallback_count += 1
 
-            # Always advance tracker regardless of outcome
+            # Save insights first, then advance the tracker, so an interrupted
+            # run never marks an entry done whose insights were never written.
+            await write_json_atomic(MISSED_INSIGHTS_PATH,
+                                    {k: list(dict.fromkeys(master_data[k])) for k in MISSED_INSIGHT_KEYS})
             if missed_id > highest_id:
                 highest_id = missed_id
                 async with aiofiles.open(MISSED_TRACKER_PATH, "w") as f:
@@ -595,10 +640,8 @@ Respond STRICTLY in valid JSON format with no extra text:
             await asyncio.sleep(0.5)
 
         for key in MISSED_INSIGHT_KEYS:
-            master_data[key] = list(set(master_data[key]))
-
-        async with aiofiles.open(MISSED_INSIGHTS_PATH, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(master_data, indent=4, ensure_ascii=False))
+            master_data[key] = list(dict.fromkeys(master_data[key]))
+        await write_json_atomic(MISSED_INSIGHTS_PATH, master_data)
 
         async with aiofiles.open(FAILED_MISSED_PATH, "w", encoding="utf-8") as f:
             await f.write("[]")
