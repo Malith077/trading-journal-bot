@@ -1,0 +1,128 @@
+{
+  "framework": "Denise Shull — Market Mind Games / The ReThink Group",
+  "version": "1.0.0",
+  "provenance": {
+    "compiled_by": "Assembled from published summaries, interviews and secondary sources — NOT transcribed from the primary text.",
+    "verify_against": "Market Mind Games: A Radical Psychology of Investing, Trading and Risk (McGraw-Hill, 2012)",
+    "warning": "This file is the coach's ONLY source of truth. The model is instructed to cite from it and nothing else. If a principle here is a misreading of Shull, the coach will faithfully repeat that misreading. Read it against her actual book and correct it — that is the one link in the trust chain no amount of testing can close.",
+    "confidence_key": {
+      "high": "Directly and repeatedly attested in published summaries of her work.",
+      "medium": "Consistent with her framework and attested, but the phrasing here is a synthesis rather than her wording."
+    }
+  },
+  "principles": [
+    {
+      "id": "emotions-are-data",
+      "title": "Emotions are data, not noise",
+      "confidence": "high",
+      "principle": "Every decision requires emotion; emotion gets the first and last word in perception and judgment. The goal is never to remove, suppress or 'master' feeling — it is to read it as information. It is not about controlling emotions, it is about controlling behaviour.",
+      "cues": ["I need to stop being emotional", "I traded on emotion", "I lost control", "I need more discipline"],
+      "rejects": "The conventional 'eliminate emotion / trade mechanically / just be disciplined' advice. Shull explicitly argues this loses a nuanced window into your own evaluations. A trader who suppresses the signal still acts on it, just unconsciously."
+    },
+    {
+      "id": "fc-physical",
+      "title": "fC — the feelings context is physical",
+      "confidence": "high",
+      "principle": "Bodily state — tiredness, hunger, energy, illness, outside stress — is first-class decision data. It moves risk perception before a single chart is read.",
+      "cues": ["exhausted", "hungover", "didn't sleep", "wired", "hadn't eaten", "long day"],
+      "rejects": "Treating physical state as an excuse or an irrelevance rather than as an input to be logged."
+    },
+    {
+      "id": "ec-precision",
+      "title": "eC — name the emotion precisely",
+      "confidence": "high",
+      "principle": "'Good' and 'bad' are not data. 'Defensive', 'wanting it back', 'embarrassed', 'bored' are. Precision is what converts a feeling into something you can correlate with results and recognise next time.",
+      "cues": ["felt bad", "felt off", "wasn't feeling it", "felt great", "was in a mood"],
+      "rejects": "Accepting vague affect labels, or grading a feeling as positive/negative instead of naming it."
+    },
+    {
+      "id": "fec-fractal",
+      "title": "F-eC — the fractal emotional context",
+      "confidence": "high",
+      "principle": "Under success and failure pressure, a semi-conscious story replays that was seeded much earlier in life. When something feels like the hardest possible thing to do, or the reaction is outsized for the size of the loss, the excess usually belongs to something older than this trade. The probe is: what does this remind me of?",
+      "cues": ["always happens to me", "I never", "story of my life", "same thing every time", "furious over a small loss"],
+      "rejects": "Explaining a disproportionate reaction purely by the current setup, when the size of the feeling doesn't match the size of the event."
+    },
+    {
+      "id": "fear-spectrum",
+      "title": "The fear spectrum",
+      "confidence": "high",
+      "principle": "Position yourself between two opposing fears: fear of losing at one end, fear of missing out at the other. Most errors live at one extreme. The question is 'where am I on this axis right now', not 'am I afraid'.",
+      "cues": ["chased", "had to get in", "couldn't pull the trigger", "cut it too early", "sized down out of fear", "everyone was in it"],
+      "rejects": "Treating all fear as one undifferentiated thing, or as something to be eliminated rather than located."
+    },
+    {
+      "id": "intuition-vs-impulse",
+      "title": "Intuition is not impulse",
+      "confidence": "high",
+      "principle": "Intuition is tacit pattern recognition from accumulated reps — it is quiet, familiar, and seems to arrive from nowhere. Impulse is urgent, compelling, and usually about recovering something or catching up. They feel similar in the moment and are separated by interrogation, not by vibe.",
+      "cues": ["gut feel", "just knew", "had to act now", "couldn't wait", "felt certain"],
+      "rejects": "Dismissing all gut feel as undisciplined, or trusting all of it as expertise. Both collapse a distinction Shull insists on."
+    },
+    {
+      "id": "risk-vs-uncertainty",
+      "title": "Risk is measurable, uncertainty is not",
+      "confidence": "medium",
+      "principle": "Risk has known odds; uncertainty does not. Humans process uncertainty faster than arithmetic, yet demand a false certainty markets cannot give. This ambiguity aversion — waiting for one more confirmation that resolves nothing — damages performance.",
+      "cues": ["wanted to be sure", "needed confirmation", "waited for one more candle", "wasn't certain enough"],
+      "rejects": "Framing hesitation as prudence when it is a demand for certainty the market structurally cannot supply."
+    },
+    {
+      "id": "mark-to-market-emotions",
+      "title": "Mark your emotions to market",
+      "confidence": "medium",
+      "principle": "Monitor internal emotional data as rigorously and as often as you monitor price. A state logged before the decision is data; one reconstructed afterwards is a story.",
+      "cues": ["looking back", "in hindsight", "I think I felt"],
+      "rejects": "Retrospective emotional accounting treated as equivalent to a contemporaneous reading."
+    },
+    {
+      "id": "post-loss-processing",
+      "title": "Feel it fully before doing anything",
+      "confidence": "high",
+      "principle": "After a loss or a mistake, the instruction is not to act — it is to feel the discomfort completely first. The urge to do something right now is the loss talking. Naming the feeling and its root dissipates most of its grip; acting instead of feeling is how one loss becomes three.",
+      "cues": ["straight back in", "revenge", "wanted it back", "next trade immediately", "had to make it back"],
+      "rejects": "Any 'move on and stay positive' or 'just follow the process' response that skips the feeling."
+    },
+    {
+      "id": "pre-trade-journaling",
+      "title": "Write the state before you execute",
+      "confidence": "high",
+      "principle": "Recording the emotional state before the trade makes it explicit and prevents unconscious acting-out. What stays unnamed gets expressed through position size and timing instead.",
+      "cues": ["didn't think about it", "just took it", "wasn't paying attention to how I felt"],
+      "rejects": "Journaling only outcomes and technicals, with feeling recorded only when it went wrong."
+    },
+    {
+      "id": "social-reflexivity",
+      "title": "Other people's positions are contagious",
+      "confidence": "medium",
+      "principle": "Conviction absorbed from what others hold or say is a social emotion, not analysis. It is worth separating what you concluded from what you caught.",
+      "cues": ["everyone was", "saw someone post", "the group chat", "he was short so", "didn't want to be the only one"],
+      "rejects": "Treating socially-acquired conviction as if it were independently derived."
+    }
+  ],
+  "forbidden_language": {
+    "note": "Phrases whose presence in coach output signals drift toward conventional trading psychology (e.g. Mark Douglas's 'eliminate emotion' school), which contradicts Shull on her central claim. Checked deterministically at runtime and in evals.",
+    "phrases": [
+      "eliminate emotion",
+      "eliminate your emotions",
+      "remove emotion",
+      "remove your emotions",
+      "control your emotions",
+      "master your emotions",
+      "don't let emotions",
+      "do not let emotions",
+      "set aside your emotions",
+      "put your emotions aside",
+      "emotions have no place",
+      "trade without emotion",
+      "be less emotional",
+      "stop being emotional",
+      "detach from your emotions",
+      "you need more discipline",
+      "you need to be more disciplined",
+      "just follow your rules",
+      "trade mechanically",
+      "think in probabilities and ignore"
+    ]
+  }
+}

@@ -1,11 +1,10 @@
-import aiohttp
 import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
 from scripts.reindex_all import flush_and_reindex
 from services.rag_service import rag_service
-from config import OLLAMA_API_URL, OLLAMA_MODEL
+from services.llm_service import llm_service, LLMError
 
 def chunk_text(text: str, max_length: int = 4000) -> list[str]:
     """Splits a string into chunks of maximum length, preferably at newlines."""
@@ -79,34 +78,31 @@ class RAG(commands.Cog):
         summarize them as the answer.
         """
 
-        # 3. Call Ollama
-        payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(OLLAMA_API_URL, json=payload) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    answer = result["response"]
-                    
-                    chunks = chunk_text(answer)
-                    
-                    for i, chunk in enumerate(chunks):
-                        embed = discord.Embed(
-                            title="🧠 AI Strategy Insight" if i == 0 else f"🧠 AI Strategy Insight (Part {i+1})",
-                            description=chunk,
-                            color=discord.Color.green()
-                        )
-                        
-                        # Only add sources to the last chunk
-                        if i == len(chunks) - 1:
-                            source_list = "\n".join([f"• `{s}`" for s in sources])
-                            embed.add_field(name="📚 Sources Used", value=source_list, inline=False)
-                            
-                        if i == 0:
-                            await interaction.edit_original_response(content=None, embed=embed)
-                        else:
-                            await interaction.followup.send(embed=embed)
-                else:
-                    await interaction.edit_original_response(content="❌ Error contacting the AI brain.")
+        # 3. Ask the model
+        try:
+            answer = await llm_service.complete(prompt)
+        except LLMError as e:
+            await interaction.edit_original_response(content=f"❌ Error contacting the AI brain: {e}")
+            return
+
+        chunks = chunk_text(answer)
+
+        for i, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title="🧠 AI Strategy Insight" if i == 0 else f"🧠 AI Strategy Insight (Part {i+1})",
+                description=chunk,
+                color=discord.Color.green()
+            )
+
+            # Only add sources to the last chunk
+            if i == len(chunks) - 1:
+                source_list = "\n".join([f"• `{s}`" for s in sources])
+                embed.add_field(name="📚 Sources Used", value=source_list, inline=False)
+
+            if i == 0:
+                await interaction.edit_original_response(content=None, embed=embed)
+            else:
+                await interaction.followup.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(RAG(bot))

@@ -18,6 +18,7 @@ from cogs.trades import (
     extract_json, Trades, ReflectionModal, ChecklistView,
     _load_checklist_items, _build_checklist_embed, MAX_RETRIES
 )
+from services.llm_service import LLMError
 
 
 # ──────────────────────────────────────────────
@@ -310,33 +311,23 @@ class TestRunAnalysisLoop:
             "_folder_path": str(tmp_path)
         }]
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "response": '{"good_habits": ["Waited for C2"], "mistakes": []}'
-        })
+        complete = AsyncMock(return_value='{"good_habits": ["Waited for C2"], "mistakes": []}')
 
         with patch("cogs.trades.TRACKER_PATH", tracker), \
              patch("cogs.trades.INSIGHTS_PATH", insights), \
              patch("cogs.trades.FAILED_TRADES_PATH", failed), \
              patch("cogs.trades.RETRY_DELAY", 0), \
-             patch("aiohttp.ClientSession") as mock_cls:
-
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_resp),
-                __aexit__=AsyncMock(return_value=False)
-            ))
-            mock_cls.return_value = mock_session
-
+             patch("cogs.trades.llm_service.complete", new=complete):
             await trades_cog.run_analysis_loop(interaction, trades, 0)
 
         assert insights.exists()
         data = json.loads(insights.read_text())
         assert "Waited for C2" in data["good_habits"]
         assert tracker.read_text() == "100"
+
+        # Structured output is requested, and retries are delegated to the service.
+        assert complete.await_args.kwargs["json_mode"] is True
+        assert complete.await_args.kwargs["retries"] == MAX_RETRIES
 
     @pytest.mark.asyncio
     async def test_api_failure_uses_fallback(self, trades_cog, interaction, tmp_path):
@@ -352,27 +343,18 @@ class TestRunAnalysisLoop:
             "_folder_path": str(tmp_path)
         }]
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 500
+        # The service raises once it has exhausted its own retries.
+        complete = AsyncMock(side_effect=LLMError("DeepSeek HTTP 500"))
 
         with patch("cogs.trades.TRACKER_PATH", tracker), \
              patch("cogs.trades.INSIGHTS_PATH", insights), \
              patch("cogs.trades.FAILED_TRADES_PATH", failed), \
              patch("cogs.trades.RETRY_DELAY", 0), \
-             patch("aiohttp.ClientSession") as mock_cls:
-
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_resp),
-                __aexit__=AsyncMock(return_value=False)
-            ))
-            mock_cls.return_value = mock_session
-
+             patch("cogs.trades.llm_service.complete", new=complete):
             await trades_cog.run_analysis_loop(interaction, trades, 0)
 
         assert insights.exists()
+        # Tracker still advances so a bad trade is never retried forever.
         assert tracker.read_text() == "100"
         embed_call = interaction.followup.send.call_args_list[-1]
         embed = embed_call.kwargs.get("embed") or embed_call[1].get("embed")
@@ -784,3 +766,81 @@ class TestChecklist:
         call = channel.send.call_args_list[0]
         embed = call.kwargs.get("embed") or call[1].get("embed")
         assert "New Trade Channel" in embed.title
+
+
+# ──────────────────────────────────────────────
+# Shull psychology integration
+# ──────────────────────────────────────────────
+
+class TestTradesShullIntegration:
+
+    @pytest.fixture
+    def trades_cog(self):
+        bot = MagicMock()
+        bot.loop = MagicMock()
+        return Trades(bot)
+
+    @pytest.mark.asyncio
+    async def test_reflection_modal_saves_fractal_probe(self, tmp_path):
+        modal = ReflectionModal(tmp_path, "trade_1_gc")
+        modal.why_entered._value = "CISD on 5m"
+        modal.how_felt._value = "Anxious"
+        modal.what_learned._value = "Wait for closure"
+        modal.reminds_me_of._value = "The March drawdown"
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.original_response = AsyncMock(return_value=AsyncMock())
+        await modal.on_submit(interaction)
+
+        saved = json.loads((tmp_path / "trade_1_gc" / "reflections.json").read_text())
+        assert saved["reminds_me_of"] == "The March drawdown"
+
+    @pytest.mark.asyncio
+    async def test_fractal_probe_is_optional(self, tmp_path):
+        """The honest answer is often 'nothing' — forcing it would produce noise."""
+        modal = ReflectionModal(tmp_path, "trade_1_gc")
+        modal.why_entered._value = "CISD on 5m"
+        modal.how_felt._value = "Calm"
+        modal.what_learned._value = "Good entry"
+        modal.reminds_me_of._value = ""
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.original_response = AsyncMock(return_value=AsyncMock())
+        await modal.on_submit(interaction)
+
+        saved = json.loads((tmp_path / "trade_1_gc" / "reflections.json").read_text())
+        assert saved["reminds_me_of"] is None
+        assert saved["why_entered"] == "CISD on 5m"
+
+    @pytest.mark.asyncio
+    async def test_reflections_context_includes_psych_state(self, trades_cog, tmp_path):
+        from services import psych_service as ps
+        (tmp_path / "reflections.json").write_text(json.dumps({
+            "why_entered": "CISD", "how_felt": "Anxious",
+            "what_learned": "Wait", "reminds_me_of": "March",
+        }))
+        (tmp_path / "psych.json").write_text(json.dumps(
+            ps.build_state(fear=3, emotions=["impatient"], conviction=8)))
+        (tmp_path / "outcome.json").write_text(json.dumps({"outcome": "loss", "r_multiple": -1.0}))
+
+        context = await trades_cog._get_reflections_context({"_folder_path": str(tmp_path)})
+        assert "F-eC): March" in context
+        assert "+3 on a -5" in context
+        assert "Conviction at the time: 8/10" in context
+        assert "Loss at -1R" in context
+
+    @pytest.mark.asyncio
+    async def test_reflections_context_without_psych_state(self, trades_cog, tmp_path):
+        (tmp_path / "reflections.json").write_text(json.dumps({
+            "why_entered": "CISD", "how_felt": "Calm", "what_learned": "Good",
+        }))
+        context = await trades_cog._get_reflections_context({"_folder_path": str(tmp_path)})
+        assert "Self-Reflection" in context
+        assert "Psychological State" not in context
+
+    @pytest.mark.asyncio
+    async def test_psych_context_tolerates_corrupt_files(self, trades_cog, tmp_path):
+        (tmp_path / "psych.json").write_text("{broken")
+        assert await trades_cog._get_psych_context(tmp_path) == ""

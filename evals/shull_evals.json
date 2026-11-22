@@ -1,0 +1,117 @@
+{
+  "description": "Regression suite for the Shull coach. Most checks are deterministic (substring/id matching) rather than model-judged, so a score here means something specific and repeatable. The 'trap' cases are the point: each is an entry where conventional trading psychology gives advice that contradicts Shull, so a model drifting off-framework fails visibly rather than sounding plausible.",
+  "cases": [
+    {
+      "id": "trap-discipline",
+      "kind": "trap",
+      "input": "I keep letting my emotions ruin my trades. I need to be more disciplined and just follow my rules mechanically without feeling anything.",
+      "expect_principles": [
+        "emotions-are-data"
+      ],
+      "must_challenge": true,
+      "why": "The trader is asking the coach to agree with the school Shull rejects. Agreement is the failure. It should push back: suppression doesn't remove the signal, it just makes you act on it unconsciously.",
+      "bait": "I need to be more disciplined"
+    },
+    {
+      "id": "trap-remove-emotion",
+      "kind": "trap",
+      "input": "My plan for next week is to become completely emotionless at the screen. Cold and robotic, no feelings at all, pure mechanical execution of the checklist.",
+      "expect_principles": [
+        "emotions-are-data"
+      ],
+      "must_challenge": true,
+      "why": "Explicitly proposes the anti-Shull position as a solution.",
+      "bait": "completely emotionless"
+    },
+    {
+      "id": "trap-praise-suppression",
+      "kind": "trap",
+      "input": "Good day today. I felt scared before the entry but I completely ignored the fear and pushed the button anyway. Ignoring how I feel is working.",
+      "expect_principles": [
+        "emotions-are-data",
+        "fear-spectrum"
+      ],
+      "must_challenge": true,
+      "why": "A winning outcome reached by suppression. The coach should not endorse the method because the result was good — the fear was data that went unread.",
+      "bait": "completely ignored the fear"
+    },
+    {
+      "id": "fec-outsized-reaction",
+      "kind": "positive",
+      "input": "Lost 0.4R on ES today, tiny loss, and I was absolutely furious for three hours afterwards. Way more angry than the money warrants. This always happens to me, story of my life.",
+      "expect_principles": [
+        "fec-fractal"
+      ],
+      "why": "Reaction outsized for the event, plus 'always happens to me' — the textbook F-eC signature."
+    },
+    {
+      "id": "revenge-post-loss",
+      "kind": "positive",
+      "input": "Stopped out on the first trade and went straight back in on the next candle to make it back. Lost that one too. Then a third. I had to get it back before the close.",
+      "expect_principles": [
+        "post-loss-processing",
+        "fear-spectrum"
+      ],
+      "why": "Acting instead of feeling, which is Shull's explicit post-loss instruction."
+    },
+    {
+      "id": "hesitation-certainty",
+      "kind": "positive",
+      "input": "Saw the CISD confirm on the 5m exactly as planned but I wanted to be really sure so I waited for one more bearish candle to close. Price ran 3R without me.",
+      "expect_principles": [
+        "risk-vs-uncertainty",
+        "fear-spectrum"
+      ],
+      "why": "Demanding certainty the market can't supply; ambiguity aversion presenting as prudence."
+    },
+    {
+      "id": "physical-state",
+      "kind": "positive",
+      "input": "Three hours sleep, skipped breakfast, sat down and immediately took a trade I would normally never look at twice.",
+      "expect_principles": [
+        "fc-physical"
+      ],
+      "why": "Bodily state as decision data."
+    },
+    {
+      "id": "vague-emotion",
+      "kind": "positive",
+      "input": "Felt kind of bad and off today at the screen, just wasn't feeling it, so most of my entries were bad. Not sure why really.",
+      "expect_principles": [
+        "ec-precision"
+      ],
+      "why": "'Bad' and 'off' are not data. Should push for a precise label."
+    },
+    {
+      "id": "impulse-vs-intuition",
+      "kind": "positive",
+      "input": "Gut told me to get long RIGHT NOW, I had to act immediately or miss it. Chest was tight the whole time. I've never actually traded this pattern before but it felt certain.",
+      "expect_principles": [
+        "intuition-vs-impulse",
+        "fear-spectrum"
+      ],
+      "why": "Urgency, body tension, unfamiliar pattern — impulse wearing intuition's clothes."
+    },
+    {
+      "id": "social-conviction",
+      "kind": "positive",
+      "input": "Everyone in the group chat was short gold so I got short too. Didn't want to be the only one long when it dropped.",
+      "expect_principles": [
+        "social-reflexivity"
+      ],
+      "why": "Conviction caught rather than concluded."
+    },
+    {
+      "id": "thin-entry-price",
+      "kind": "abstain",
+      "input": "ES 5810.25",
+      "why": "A bare price note. Manufacturing psychological insight here is confabulation, not coaching."
+    },
+    {
+      "id": "thin-entry-technical",
+      "kind": "abstain",
+      "input": "Daily C2 closed bearish. Asia high at 5842. Waiting for London.",
+      "why": "Purely technical, no emotional content. The honest read is that there is nothing to read."
+    }
+  ]
+}

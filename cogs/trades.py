@@ -1,19 +1,18 @@
 import discord
 import json
+import asyncio
 import re
-import aiohttp
-import base64
-import asyncio
-import aiofiles
-import asyncio
 import aiofiles
 from pathlib import Path
 from discord import app_commands
 from discord.ext import commands
 from discord import ui
+from services.json_utils import extract_json as _extract_json
+from services.llm_service import llm_service, LLMError, encode_image_file
+from services import psych_service as ps
+from services.guild_guard import is_allowed_guild
 from config import (
-    OLLAMA_API_URL,
-    OLLAMA_MODEL,
+    DEEPSEEK_JOURNAL_EFFORT,
     TRADES_DIR,
     INSIGHTS_PATH,
     TRACKER_PATH,
@@ -26,29 +25,12 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds between retries
 
 
+EMPTY_TRADE_INSIGHTS = {"good_habits": [], "mistakes": []}
+
+
 def extract_json(raw: str) -> dict:
-    """
-    Robustly extracts a JSON object from a model response.
-    Tries three methods in order:
-      1. Direct parse (model returned clean JSON)
-      2. Regex extraction (JSON buried in surrounding text)
-      3. Fallback empty result (model response was completely unparseable)
-    """
-    cleaned = raw.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r'\{.*?\}', cleaned, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-
-    print(f"[WARN] Could not parse JSON from model response. Using empty fallback.\nRaw: {raw[:300]}")
-    return {"good_habits": [], "mistakes": []}
+    """Extract a trade-insight JSON object from a model response."""
+    return _extract_json(raw, EMPTY_TRADE_INSIGHTS)
 
 
 # ──────────────────────────────────────────────
@@ -79,6 +61,15 @@ class ReflectionModal(ui.Modal, title="📝 Trade Reflection"):
         required=True,
         max_length=1000
     )
+    # Shull's F-eC probe. Optional, because the honest answer is often "nothing"
+    # and forcing it would produce noise instead of data.
+    reminds_me_of = ui.TextInput(
+        label="What did this remind me of?",
+        placeholder="An earlier trade, an earlier week — or something outside markets entirely.",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000
+    )
 
     def __init__(self, trades_dir: Path, channel_name: str):
         super().__init__()
@@ -90,7 +81,8 @@ class ReflectionModal(ui.Modal, title="📝 Trade Reflection"):
         reflections = {
             "why_entered": self.why_entered.value,
             "how_felt": self.how_felt.value,
-            "what_learned": self.what_learned.value
+            "what_learned": self.what_learned.value,
+            "reminds_me_of": self.reminds_me_of.value or None
         }
 
         # Save to disk
@@ -108,6 +100,9 @@ class ReflectionModal(ui.Modal, title="📝 Trade Reflection"):
         embed.add_field(name="Why did I enter?", value=reflections["why_entered"], inline=False)
         embed.add_field(name="How did I feel?", value=reflections["how_felt"], inline=False)
         embed.add_field(name="What did I learn?", value=reflections["what_learned"], inline=False)
+        if reflections["reminds_me_of"]:
+            embed.add_field(name="What did this remind me of?", value=reflections["reminds_me_of"], inline=False)
+        embed.set_footer(text="Tip: /state logs the emotional read; /outcome tags the result.")
 
         await interaction.response.send_message(embed=embed)
         response_msg = await interaction.original_response()
@@ -264,6 +259,8 @@ class Trades(commands.Cog):
             return
         if not channel.category or not channel.category.name.startswith("Fractal_Trades"):
             return
+        if not is_allowed_guild(channel.guild):
+            return
 
         # --- Checklist ---
         items = _load_checklist_items()
@@ -293,7 +290,12 @@ class Trades(commands.Cog):
         embed.add_field(name="📋 Questions", value=(
             "1️⃣ **Why did I enter this trade?**\n"
             "2️⃣ **How did I feel?**\n"
-            "3️⃣ **What did I learn?**"
+            "3️⃣ **What did I learn?**\n"
+            "4️⃣ **What did this remind me of?**"
+        ), inline=False)
+        embed.add_field(name="🧠 Before you click", value=(
+            "`/state` — mark-to-market your emotional read *before* the entry.\n"
+            "`/outcome` — tag the result afterwards so the two can be correlated."
         ), inline=False)
 
         view = ReflectionView()
@@ -317,6 +319,8 @@ class Trades(commands.Cog):
         if not hasattr(channel, "category") or not channel.category:
             return
         if not channel.category.name.startswith("Fractal_Trades"):
+            return
+        if not is_allowed_guild(message.guild):
             return
 
         guild_id = message.guild.id
@@ -380,14 +384,37 @@ class Trades(commands.Cog):
             async with aiofiles.open(reflections_path, "r", encoding="utf-8") as f:
                 content = await f.read()
                 data = json.loads(content)
-            return (
+            context = (
                 "\nTrader's Self-Reflection:\n"
                 f"- Why I entered: {data.get('why_entered', 'N/A')}\n"
                 f"- How I felt: {data.get('how_felt', 'N/A')}\n"
                 f"- What I learned: {data.get('what_learned', 'N/A')}\n"
             )
+            if data.get("reminds_me_of"):
+                context += f"- What it reminded me of (F-eC): {data['reminds_me_of']}\n"
+            return context + await self._get_psych_context(folder)
         except (json.JSONDecodeError, Exception):
             return ""
+
+    @staticmethod
+    async def _get_psych_context(folder: Path) -> str:
+        """Load any logged psychological state + outcome for this trade."""
+        state, outcome = {}, {}
+        for name, target in (("psych.json", "state"), ("outcome.json", "outcome")):
+            path = folder / name
+            if not path.exists():
+                continue
+            try:
+                async with aiofiles.open(path, "r", encoding="utf-8") as f:
+                    loaded = json.loads(await f.read())
+                if isinstance(loaded, dict):
+                    if target == "state":
+                        state = loaded
+                    else:
+                        outcome = loaded
+            except (json.JSONDecodeError, Exception):
+                continue
+        return ps.format_state_context(state, outcome)
 
     @app_commands.command(name="sync_fractals", description="Download all trades and images from the Fractal_Trades category.")
     async def sync_fractals(self, interaction: discord.Interaction):
@@ -509,31 +536,31 @@ class Trades(commands.Cog):
             except Exception:
                 pass
 
-        status_msg = await interaction.followup.send("🧪 Initializing analysis...")
+        status_msg = await interaction.followup.send(
+            f"🧪 Initializing analysis via `{llm_service.model_for(images=True)}`..."
+        )
 
-        async with aiohttp.ClientSession() as session:
-            highest_id = last_id
-            for idx, trade in enumerate(all_trades, 1):
-                trade_id = int(trade["message_id"])
+        highest_id = last_id
+        for idx, trade in enumerate(all_trades, 1):
+            trade_id = int(trade["message_id"])
 
-                try:
-                    await status_msg.edit(content=(
-                        f"📊 **Batch Progress:** `{idx}/{total_trades}`\n"
-                        f"🆔 **ID:** `{trade_id}`\n"
-                        f"✅ **Analysed:** `{success_count}` | ⚠️ **Fallback:** `{fallback_count}`"
-                    ))
-                except Exception:
-                    pass
+            try:
+                await status_msg.edit(content=(
+                    f"📊 **Batch Progress:** `{idx}/{total_trades}`\n"
+                    f"🆔 **ID:** `{trade_id}`\n"
+                    f"✅ **Analysed:** `{success_count}` | ⚠️ **Fallback:** `{fallback_count}`"
+                ))
+            except Exception:
+                pass
 
-                images_b64 = []
-                for img_name in trade.get("images", []):
-                    img_path = Path(trade["_folder_path"]) / img_name
-                    if img_path.exists():
-                        async with aiofiles.open(img_path, "rb") as f:
-                            images_b64.append(base64.b64encode(await f.read()).decode("utf-8"))
+            images = []
+            for img_name in trade.get("images", []):
+                encoded = await encode_image_file(Path(trade["_folder_path"]) / img_name)
+                if encoded:
+                    images.append(encoded)
 
-                reflections_context = await self._get_reflections_context(trade)
-                prompt = f"""Analyze this single trading journal entry and its attached chart(s).
+            reflections_context = await self._get_reflections_context(trade)
+            prompt = f"""Analyze this single trading journal entry and its attached chart(s).
 The trader utilizes the TTrades Fractal Model (SMT, CISD, FVG).
 
 Here are examples of how to extract insights from trade notes:
@@ -558,58 +585,44 @@ TASK:
 Extract the specific 'good_habits' and 'mistakes' mentioned or visible in THIS SPECIFIC trade.
 Also consider the trader's own reflections if provided above — they reveal emotional and decision-making patterns.
 Keep each insight to a single concise sentence. Do not repeat insights from the examples above unless they genuinely apply.
+{ps.SHULL_ANALYST_GUIDANCE}
 
 Respond STRICTLY in valid JSON format with no extra text:
 {{"good_habits": ["..."], "mistakes": ["..."]}}"""
 
-                payload = {
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "images": images_b64,
-                    "stream": False,
-                    "format": "json"
-                }
+            parsed = None
+            last_error = None
 
-                parsed = None
-                last_error = None
+            # Retries, timeouts and provider differences live in llm_service.
+            try:
+                raw = await llm_service.complete(
+                    prompt,
+                    images=images,
+                    json_mode=True,
+                    reasoning_effort=DEEPSEEK_JOURNAL_EFFORT,
+                    retries=MAX_RETRIES,
+                    retry_delay=RETRY_DELAY,
+                )
+                parsed = extract_json(raw)
+            except LLMError as e:
+                last_error = str(e)
 
-                # Retry loop — up to MAX_RETRIES attempts per trade
-                for attempt in range(1, MAX_RETRIES + 1):
-                    try:
-                        async with session.post(OLLAMA_API_URL, json=payload, timeout=180) as resp:
-                            if resp.status == 200:
-                                res = await resp.json()
-                                parsed = extract_json(res["response"])
-                                break  # success — exit retry loop
-                            else:
-                                last_error = f"HTTP {resp.status}"
-                                print(f"Trade {trade_id} attempt {attempt} failed — {last_error}")
-                    except asyncio.TimeoutError:
-                        last_error = "Timeout"
-                        print(f"Trade {trade_id} attempt {attempt} timed out.")
-                    except Exception as e:
-                        last_error = str(e)
-                        print(f"Trade {trade_id} attempt {attempt} error: {e}")
+            # Use result or empty fallback — trade is ALWAYS marked as processed
+            if parsed is not None:
+                master_data["good_habits"].extend(parsed.get("good_habits", []))
+                master_data["mistakes"].extend(parsed.get("mistakes", []))
+                success_count += 1
+            else:
+                print(f"Trade {trade_id} exhausted all {MAX_RETRIES} retries ({last_error}). Using empty fallback.")
+                fallback_count += 1
 
-                    if attempt < MAX_RETRIES:
-                        await asyncio.sleep(RETRY_DELAY)
+            # Always advance tracker regardless of outcome
+            if trade_id > highest_id:
+                highest_id = trade_id
+                async with aiofiles.open(TRACKER_PATH, "w") as f:
+                    await f.write(str(highest_id))
 
-                # Use result or empty fallback — trade is ALWAYS marked as processed
-                if parsed is not None:
-                    master_data["good_habits"].extend(parsed.get("good_habits", []))
-                    master_data["mistakes"].extend(parsed.get("mistakes", []))
-                    success_count += 1
-                else:
-                    print(f"Trade {trade_id} exhausted all {MAX_RETRIES} retries ({last_error}). Using empty fallback.")
-                    fallback_count += 1
-
-                # Always advance tracker regardless of outcome
-                if trade_id > highest_id:
-                    highest_id = trade_id
-                    async with aiofiles.open(TRACKER_PATH, "w") as f:
-                        await f.write(str(highest_id))
-
-                await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5)
 
         master_data["good_habits"] = list(set(master_data["good_habits"]))
         master_data["mistakes"] = list(set(master_data["mistakes"]))

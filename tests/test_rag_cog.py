@@ -4,6 +4,7 @@ Unit tests for cogs/rag.py
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from cogs.rag import RAG, chunk_text
+from services.llm_service import LLMError
 
 
 class TestChunkText:
@@ -62,21 +63,10 @@ class TestRAGCog:
 
     @pytest.mark.asyncio
     async def test_ask_successful(self, cog, interaction):
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"response": "CISD means Change in State."})
-
         with patch("cogs.rag.rag_service") as mock_rag, \
-             patch("aiohttp.ClientSession") as mock_cls:
+             patch("cogs.rag.llm_service.complete",
+                   new=AsyncMock(return_value="CISD means Change in State.")):
             mock_rag.query_knowledge.return_value = ("context chunk", ["article.md"])
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_resp),
-                __aexit__=AsyncMock(return_value=False)
-            ))
-            mock_cls.return_value = mock_session
             await cog.ask_bot.callback(cog, interaction, question="What is CISD?")
 
         embed_calls = [c for c in interaction.edit_original_response.call_args_list if c.kwargs.get("embed")]
@@ -86,21 +76,10 @@ class TestRAGCog:
     @pytest.mark.asyncio
     async def test_ask_long_response(self, cog, interaction):
         long_answer = "A" * 5000
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"response": long_answer})
-
         with patch("cogs.rag.rag_service") as mock_rag, \
-             patch("aiohttp.ClientSession") as mock_cls:
+             patch("cogs.rag.llm_service.complete",
+                   new=AsyncMock(return_value=long_answer)):
             mock_rag.query_knowledge.return_value = ("context chunk", ["article.md"])
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_resp),
-                __aexit__=AsyncMock(return_value=False)
-            ))
-            mock_cls.return_value = mock_session
             await cog.ask_bot.callback(cog, interaction, question="Long question?")
 
         # 5000 chars should be split into 2 chunks of <=4000
@@ -119,20 +98,10 @@ class TestRAGCog:
 
     @pytest.mark.asyncio
     async def test_ask_api_error(self, cog, interaction):
-        mock_resp = AsyncMock()
-        mock_resp.status = 500
-
         with patch("cogs.rag.rag_service") as mock_rag, \
-             patch("aiohttp.ClientSession") as mock_cls:
+             patch("cogs.rag.llm_service.complete",
+                   new=AsyncMock(side_effect=LLMError("DeepSeek HTTP 500"))):
             mock_rag.query_knowledge.return_value = ("some context", ["file.md"])
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_resp),
-                __aexit__=AsyncMock(return_value=False)
-            ))
-            mock_cls.return_value = mock_session
             await cog.ask_bot.callback(cog, interaction, question="test")
 
         interaction.edit_original_response.assert_called()

@@ -24,17 +24,30 @@ jobs:
 
       - name: 3. Sync Files to Pi
         run: |
-          # Sync files while protecting all local data stores
+          # Sync files while protecting all local data stores.
+          #
+          # IMPORTANT: --delete removes anything in the destination that is not
+          # in the repo. Every runtime data file is gitignored, so it only
+          # survives a deploy if it is excluded here. Adding a new persisted
+          # file to config.py means adding it to this list too, or it gets
+          # silently wiped on the next push.
           rsync -avz --delete \
             --exclude '.env' \
             --exclude 'venv/' \
+            --exclude '.git/' \
+            --exclude '.req_hash' \
             --exclude 'downloads/' \
             --exclude 'knowledge_base/' \
             --exclude 'chroma_db/' \
             --exclude 'master_insights.json' \
             --exclude 'last_analyzed.txt' \
-            --exclude '.req_hash' \
-            --exclude '.git/' \
+            --exclude 'missed_insights.json' \
+            --exclude 'last_missed_analyzed.txt' \
+            --exclude 'psych_log.jsonl' \
+            --exclude 'coach_log.jsonl' \
+            --exclude 'coach_settings.json' \
+            --exclude 'failed_trades.json' \
+            --exclude 'failed_missed.json' \
             ./ /home/malith/bot/
 
       - name: 4. Update System Service File

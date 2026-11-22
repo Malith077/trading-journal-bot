@@ -7,3 +7,6 @@ pydantic-settings
 aiofiles==23.2.1
 pytest-asyncio
 pytest-aiohttp
+# Imported directly by services/llm_service.py as a CA-bundle fallback
+# when the system trust store is empty (common on macOS python.org builds).
+certifi

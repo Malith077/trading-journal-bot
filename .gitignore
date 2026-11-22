@@ -5,9 +5,15 @@ lib/
 knowledge_base/
 last_analyzed.txt
 master_insights.json
+last_missed_analyzed.txt
+missed_insights.json
+failed_missed.json
+psych_log.jsonl
 pyvenv.cfg
 .env
 /downloads
 /venv/
 __pycache__/
 chroma_db/
+coach_log.jsonl
+coach_settings.json

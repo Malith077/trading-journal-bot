@@ -1,13 +1,13 @@
 import discord
-import aiohttp
 import base64
 import asyncio
 import aiofiles
 from pathlib import Path
 from discord import app_commands
 from discord.ext import commands
-from config import OLLAMA_API_URL, OLLAMA_MODEL, KB_DIR
+from config import KB_DIR
 from services.rag_service import rag_service
+from services.llm_service import llm_service, LLMError, to_data_uri
 
 class Knowledge(commands.Cog):
     def __init__(self, bot):
@@ -30,7 +30,7 @@ class Knowledge(commands.Cog):
 
         full_text_log = []
         images_b64 = []
-        IMAGE_LIMIT = 10  # Limit to avoid payload size errors with Ollama
+        IMAGE_LIMIT = 10  # Keep the request well inside the provider size cap
 
         # 2. Collect History
         async for message in target_channel.history(limit=500, oldest_first=True):
@@ -44,7 +44,8 @@ class Knowledge(commands.Cog):
                 for attachment in message.attachments:
                     if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
                         img_bytes = await attachment.read()
-                        images_b64.append(base64.b64encode(img_bytes).decode("utf-8"))
+                        raw_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                        images_b64.append(to_data_uri(raw_b64, attachment.filename))
 
         if not full_text_log and not images_b64:
             await interaction.edit_original_response(content="❌ No content found to analyze.")
@@ -73,49 +74,42 @@ class Knowledge(commands.Cog):
         {combined_content}
         """
 
-        # 4. API Call to Ollama
-        payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "images": images_b64,
-            "stream": False
-        }
-
+        # 4. Ask the model (vision model is selected automatically when images are present)
         await interaction.edit_original_response(content=f"🧠 Processing {len(images_b64)} images and history with AI...")
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(OLLAMA_API_URL, json=payload) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        article_content = result["response"]
+        try:
+            article_content = await llm_service.complete(prompt, images=images_b64)
+        except LLMError as e:
+            await interaction.edit_original_response(content=f"❌ AI Error: {str(e)[:300]}")
+            return
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Processing Error: {str(e)}")
+            return
 
-                        # 5. Save to Knowledge Base Directory
-                        KB_DIR.mkdir(exist_ok=True)
-                        file_name = f"{target_channel.name}_article.md"
-                        file_path = KB_DIR / file_name
-                        
-                        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
-                            await f.write(article_content)
+        try:
+            # 5. Save to Knowledge Base Directory
+            KB_DIR.mkdir(exist_ok=True)
+            file_name = f"{target_channel.name}_article.md"
+            file_path = KB_DIR / file_name
 
-                        # 6. Index for RAG
-                        await interaction.edit_original_response(content="🚀 Article generated. Indexing into vector database...")
-                        await asyncio.to_thread(rag_service.index_markdown_file, file_path)
+            async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+                await f.write(article_content)
 
-                        # 7. Final Confirmation
-                        embed = discord.Embed(
-                            title=f"📖 Knowledge Synthesized: #{target_channel.name}", 
-                            color=discord.Color.blue()
-                        )
-                        embed.add_field(name="Source", value=f"#{target_channel.name}", inline=True)
-                        embed.add_field(name="Status", value="Indexed for `!ask`", inline=True)
-                        embed.set_footer(text=f"Saved to /knowledge_base/{file_name}")
-                        await interaction.edit_original_response(content=None, embed=embed)
-                    else:
-                        err_text = await response.text()
-                        await interaction.edit_original_response(content=f"❌ Ollama Error {response.status}: {err_text[:200]}")
-            except Exception as e:
-                await interaction.edit_original_response(content=f"❌ Processing Error: {str(e)}")
+            # 6. Index for RAG
+            await interaction.edit_original_response(content="🚀 Article generated. Indexing into vector database...")
+            await asyncio.to_thread(rag_service.index_markdown_file, file_path)
+
+            # 7. Final Confirmation
+            embed = discord.Embed(
+                title=f"📖 Knowledge Synthesized: #{target_channel.name}",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Source", value=f"#{target_channel.name}", inline=True)
+            embed.add_field(name="Status", value="Indexed for `!ask`", inline=True)
+            embed.set_footer(text=f"Saved to /knowledge_base/{file_name}")
+            await interaction.edit_original_response(content=None, embed=embed)
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Processing Error: {str(e)}")
 
 async def setup(bot):
     await bot.add_cog(Knowledge(bot))

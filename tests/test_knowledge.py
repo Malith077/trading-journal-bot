@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 from cogs.knowledge import Knowledge
+from services.llm_service import LLMError
 
 
 class TestKnowledgeCog:
@@ -63,23 +64,10 @@ class TestKnowledgeCog:
             yield msg
         target.history = mock_history
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"response": "# Strategy Article\nContent"})
-
         with patch("cogs.knowledge.KB_DIR", tmp_path), \
              patch("cogs.knowledge.rag_service") as mock_rag, \
-             patch("aiohttp.ClientSession") as mock_cls:
-
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_resp),
-                __aexit__=AsyncMock(return_value=False)
-            ))
-            mock_cls.return_value = mock_session
-
+             patch("cogs.knowledge.llm_service.complete",
+                   new=AsyncMock(return_value="# Strategy Article\nContent")):
             await cog.extract_knowledge.callback(cog, interaction, target_channel=target)
 
         article = tmp_path / "strategy_channel_article.md"
@@ -88,7 +76,7 @@ class TestKnowledgeCog:
         mock_rag.index_markdown_file.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_ollama_error(self, cog, interaction):
+    async def test_llm_error_is_reported(self, cog, interaction):
         target = MagicMock(spec=discord.TextChannel)
         target.name = "test_ch"
 
@@ -103,20 +91,8 @@ class TestKnowledgeCog:
             yield msg
         target.history = mock_history
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 500
-        mock_resp.text = AsyncMock(return_value="Internal error")
-
-        with patch("aiohttp.ClientSession") as mock_cls:
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_resp),
-                __aexit__=AsyncMock(return_value=False)
-            ))
-            mock_cls.return_value = mock_session
-
+        with patch("cogs.knowledge.llm_service.complete",
+                   new=AsyncMock(side_effect=LLMError("DeepSeek HTTP 500"))):
             await cog.extract_knowledge.callback(cog, interaction, target_channel=target)
 
-        assert any("Ollama Error" in str(c) for c in interaction.edit_original_response.call_args_list)
+        assert any("AI Error" in str(c) for c in interaction.edit_original_response.call_args_list)

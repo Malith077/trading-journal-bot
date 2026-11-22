@@ -55,7 +55,9 @@ class RAGService:
     def __init__(self):
         self.client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
         embedding_url = f"{OLLAMA_API_URL.replace('/generate', '/embeddings')}"
-        # Use Ollama for local embeddings
+        # Embeddings stay on Ollama deliberately: DeepSeek exposes no embeddings
+        # endpoint, so this is the one place the local model is still required.
+        # Generation moved to services/llm_service.py.
         self.embed_fn = embedding_functions.OllamaEmbeddingFunction(
             url=embedding_url,
             model_name=EMBED_MODEL
