@@ -9,6 +9,8 @@ Commands:
   /coach          Coach an arbitrary piece of text on demand.
   /coach_auto     Turn automatic coaching on or off.
   /coach_trust    What the coach is grounded in, and how it has actually scored.
+  /shull_review   Review a whole trade channel once you've finished writing it.
+                  The 🧠 Shull Review button on each new trade channel does the same.
 """
 import json
 import time
@@ -19,7 +21,7 @@ from discord import app_commands
 from discord.ext import commands
 from discord import ui
 
-from config import COACH_LOG_PATH, COACH_AUTO_DEFAULT, COACH_SETTINGS_PATH
+from config import COACH_LOG_PATH, COACH_AUTO_DEFAULT, COACH_SETTINGS_PATH, TRADES_DIR
 from services import coach_service as cs
 from services.guild_guard import is_allowed_guild
 from services.coach_service import CoachError
@@ -27,6 +29,18 @@ from services.coach_service import CoachError
 # Don't coach the same channel more than once per this window. Journalling comes
 # in bursts of several messages; one reading per burst is the useful cadence.
 COACH_COOLDOWN_SECONDS = 90
+
+# A channel review reads everything you wrote in the channel. These bound the
+# prompt: the whole principles corpus already rides along with every call.
+REVIEW_HISTORY_LIMIT = 200
+MAX_REVIEW_CHARS = 8000
+
+REFLECTION_LABELS = (
+    ("why_entered", "Why I entered"),
+    ("how_felt", "How I felt"),
+    ("what_learned", "What I learned"),
+    ("reminds_me_of", "What it reminded me of"),
+)
 
 
 async def _read_json(path, default):
@@ -75,6 +89,49 @@ async def read_grades(log_path) -> list[dict]:
         if isinstance(record, dict):
             records.append(record)
     return records
+
+
+async def gather_trade_entry(channel, trades_dir=None) -> tuple[str, bool]:
+    """
+    Assemble a trade channel into one journal entry for a Shull review.
+
+    Your own messages come first, oldest first, then the saved reflection form
+    if there is one. Bot messages (checklists, earlier readings) are left out so
+    the coach only reads what you wrote.
+
+    Returns (entry, coachable). `coachable` is judged on your words alone, not
+    on the section labels added here.
+    """
+    notes = []
+    async for message in channel.history(limit=REVIEW_HISTORY_LIMIT, oldest_first=True):
+        if message.author.bot:
+            continue
+        text = (message.content or "").strip()
+        if text:
+            notes.append(text)
+
+    reflections = await _read_json(
+        Path(trades_dir or TRADES_DIR) / channel.name / "reflections.json", {})
+    reflection_lines = [
+        f"- {label}: {reflections[key].strip()}"
+        for key, label in REFLECTION_LABELS
+        if isinstance(reflections.get(key), str) and reflections[key].strip()
+    ]
+
+    notes_text = "\n\n".join(notes)
+    if len(notes_text) > MAX_REVIEW_CHARS:
+        # Keep the end: the last things written are the closest to "done".
+        notes_text = "…" + notes_text[-MAX_REVIEW_CHARS:]
+
+    sections = []
+    if notes_text:
+        sections.append(f"TRADE NOTES:\n{notes_text}")
+    if reflection_lines:
+        sections.append("REFLECTION FORM:\n" + "\n".join(reflection_lines))
+
+    own_words = notes_text + " ".join(reflections.get(k) or "" for k, _ in REFLECTION_LABELS
+                                      if isinstance(reflections.get(k), str))
+    return "\n\n".join(sections), cs.is_coachable(own_words)
 
 
 def build_feedback_embed(feedback: dict, corpus: dict) -> discord.Embed:
@@ -170,6 +227,7 @@ class Coach(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._last_coached: dict[int, float] = {}   # channel_id → monotonic time
+        self._reviewing: set[int] = set()            # channels with a review in flight
         self._corpus = None
         self._corpus_error = None
         try:
@@ -248,6 +306,66 @@ class Coach(commands.Cog):
         embed = build_feedback_embed(feedback, self._corpus)
         view = GradeView(self, record)
         return await destination.send(embed=embed, view=view)
+
+    # --- channel review (button + /shull_review) ---
+
+    async def review_channel(self, interaction: discord.Interaction):
+        """
+        Run a Shull review over everything written in the interaction's channel.
+
+        Triggered by the 🧠 Shull Review button on a trade channel, or by
+        /shull_review. Unlike auto-coaching, which reads one message as you
+        write it, this waits until you say you're done and reads the whole trade.
+        """
+        channel = interaction.channel
+        if not is_allowed_guild(interaction.guild):
+            await interaction.response.send_message(
+                "This bot instance isn't handling this server.", ephemeral=True)
+            return
+        if not self._corpus:
+            await interaction.response.send_message(
+                f"❌ Coaching is disabled: {self._corpus_error}", ephemeral=True)
+            return
+        if not self._is_journal_channel(channel):
+            await interaction.response.send_message(
+                "❌ Run this in a trade channel — there's no journal here to review.",
+                ephemeral=True)
+            return
+        if channel.id in self._reviewing:
+            await interaction.response.send_message(
+                "⏳ A Shull review of this channel is already running.", ephemeral=True)
+            return
+
+        self._reviewing.add(channel.id)
+        try:
+            await interaction.response.defer(thinking=True)
+            entry, coachable = await gather_trade_entry(channel)
+            if not coachable:
+                await interaction.followup.send(
+                    "📭 Not enough written here to review yet (under "
+                    f"{cs.MIN_ENTRY_CHARS} characters of your own words). Add your "
+                    "thoughts — what you saw, what you felt — then press the button again."
+                )
+                return
+
+            # Imported here: the trades cog is the owner of per-trade state files.
+            from cogs.trades import Trades
+            context = await Trades._get_psych_context(TRADES_DIR / channel.name)
+            try:
+                feedback = await cs.coach(entry, context=context, corpus=self._corpus)
+            except CoachError as e:
+                await interaction.followup.send(f"❌ Shull review failed: {e}")
+                return
+        finally:
+            self._reviewing.discard(channel.id)
+
+        await self._send_feedback(interaction.followup, entry, feedback,
+                                  channel_name=channel.name)
+
+    @app_commands.command(name="shull_review",
+                          description="Shull review of everything you've written in this trade channel.")
+    async def shull_review(self, interaction: discord.Interaction):
+        await self.review_channel(interaction)
 
     # --- /coach ---
 

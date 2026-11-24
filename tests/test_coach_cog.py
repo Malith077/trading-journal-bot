@@ -366,3 +366,164 @@ class TestCommands:
             broken = Coach(MagicMock())
         await broken.coach_trust.callback(broken, interaction)
         assert "disabled" in interaction.followup.send.call_args[0][0]
+
+
+# ──────────────────────────────────────────────
+# Channel review (🧠 Shull Review button / /shull_review)
+# ──────────────────────────────────────────────
+
+from cogs.coach import gather_trade_entry, MAX_REVIEW_CHARS
+
+
+def history_of(messages):
+    """channel.history(...) stand-in: an async iterator over the given messages."""
+    async def agen():
+        for m in messages:
+            yield m
+    return MagicMock(side_effect=lambda **kwargs: agen())
+
+
+def msg(content, is_bot=False):
+    m = MagicMock()
+    m.author.bot = is_bot
+    m.content = content
+    return m
+
+
+def review_channel(messages, name="trade_7_gc", category="Fractal_Trades", channel_id=7):
+    ch = MagicMock()
+    ch.id = channel_id
+    ch.name = name
+    ch.history = history_of(messages)
+    ch.category = MagicMock()
+    ch.category.name = category
+    return ch
+
+
+def review_interaction(channel):
+    i = MagicMock()
+    i.channel = channel
+    i.guild = MagicMock()
+    i.response = AsyncMock()
+    i.followup = AsyncMock()
+    return i
+
+
+class TestGatherTradeEntry:
+
+    @pytest.mark.asyncio
+    async def test_reads_own_messages_in_order_and_skips_bots(self, tmp_path):
+        ch = review_channel([msg("checklist", is_bot=True), msg("First thought."),
+                             msg(""), msg("Second thought.")])
+        entry, _ = await gather_trade_entry(ch, tmp_path)
+        assert "checklist" not in entry
+        assert entry.index("First thought.") < entry.index("Second thought.")
+
+    @pytest.mark.asyncio
+    async def test_includes_reflection_form(self, tmp_path):
+        folder = tmp_path / "trade_7_gc"
+        folder.mkdir()
+        (folder / "reflections.json").write_text(json.dumps({
+            "why_entered": "CISD on the 5m", "how_felt": "Rushed, tight chest",
+            "what_learned": "Wait", "reminds_me_of": None}))
+        entry, _ = await gather_trade_entry(review_channel([msg("Notes.")]), tmp_path)
+        assert "REFLECTION FORM" in entry
+        assert "How I felt: Rushed, tight chest" in entry
+        assert "reminded" not in entry  # empty answer left out, not rendered as None
+
+    @pytest.mark.asyncio
+    async def test_coachable_judged_on_own_words_not_labels(self, tmp_path):
+        _, coachable = await gather_trade_entry(review_channel([msg("ES 5810")]), tmp_path)
+        assert coachable is False
+        _, coachable = await gather_trade_entry(review_channel([msg(SUBSTANTIVE)]), tmp_path)
+        assert coachable is True
+
+    @pytest.mark.asyncio
+    async def test_reflection_alone_is_enough(self, tmp_path):
+        folder = tmp_path / "trade_7_gc"
+        folder.mkdir()
+        (folder / "reflections.json").write_text(json.dumps({"how_felt": SUBSTANTIVE}))
+        entry, coachable = await gather_trade_entry(review_channel([]), tmp_path)
+        assert coachable is True
+        assert "TRADE NOTES" not in entry
+
+    @pytest.mark.asyncio
+    async def test_long_channels_keep_the_latest_writing(self, tmp_path):
+        ch = review_channel([msg("OLDEST " + "x" * MAX_REVIEW_CHARS), msg("NEWEST")])
+        entry, _ = await gather_trade_entry(ch, tmp_path)
+        assert "NEWEST" in entry and "OLDEST" not in entry
+        assert len(entry) < MAX_REVIEW_CHARS + 100
+
+
+class TestChannelReview:
+
+    @pytest.mark.asyncio
+    async def test_reviews_whole_channel_and_posts_gradeable_reading(self, cog, tmp_path):
+        i = review_interaction(review_channel([msg(SUBSTANTIVE), msg("And it still stung.")]))
+        with patch("cogs.coach.TRADES_DIR", tmp_path), \
+             patch("cogs.coach.cs.coach", new=AsyncMock(return_value=FEEDBACK)) as c:
+            await cog.review_channel(i)
+
+        entry = c.call_args[0][0]
+        assert SUBSTANTIVE in entry and "And it still stung." in entry
+        i.response.defer.assert_awaited_once()
+        kwargs = i.followup.send.call_args.kwargs
+        assert kwargs["embed"].title == "🧠 Shull Reading"
+        assert isinstance(kwargs["view"], GradeView)
+        assert kwargs["view"].record["channel"] == "trade_7_gc"
+
+    @pytest.mark.asyncio
+    async def test_passes_logged_psych_state_as_context(self, cog, tmp_path):
+        folder = tmp_path / "trade_7_gc"
+        folder.mkdir()
+        (folder / "psych.json").write_text(json.dumps({"fear_spectrum": 4}))
+        i = review_interaction(review_channel([msg(SUBSTANTIVE)]))
+        with patch("cogs.coach.TRADES_DIR", tmp_path), \
+             patch("cogs.coach.cs.coach", new=AsyncMock(return_value=FEEDBACK)) as c:
+            await cog.review_channel(i)
+        assert "+4" in c.call_args.kwargs["context"]
+
+    @pytest.mark.asyncio
+    async def test_thin_channel_is_not_sent_to_the_model(self, cog, tmp_path):
+        i = review_interaction(review_channel([msg("ES short")]))
+        with patch("cogs.coach.TRADES_DIR", tmp_path), \
+             patch("cogs.coach.cs.coach", new=AsyncMock()) as c:
+            await cog.review_channel(i)
+        c.assert_not_awaited()
+        assert "Not enough written" in i.followup.send.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_failure_is_reported_and_lock_released(self, cog, tmp_path):
+        ch = review_channel([msg(SUBSTANTIVE)])
+        i = review_interaction(ch)
+        with patch("cogs.coach.TRADES_DIR", tmp_path), \
+             patch("cogs.coach.cs.coach", new=AsyncMock(side_effect=cs.CoachError("timeout"))):
+            await cog.review_channel(i)
+        assert "timeout" in i.followup.send.call_args[0][0]
+        assert ch.id not in cog._reviewing
+
+    @pytest.mark.asyncio
+    async def test_double_press_is_refused_while_running(self, cog):
+        ch = review_channel([msg(SUBSTANTIVE)])
+        cog._reviewing.add(ch.id)
+        i = review_interaction(ch)
+        with patch("cogs.coach.cs.coach", new=AsyncMock()) as c:
+            await cog.review_channel(i)
+        c.assert_not_awaited()
+        assert "already running" in i.response.send_message.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_refused_outside_journal_channels(self, cog):
+        i = review_interaction(review_channel([msg(SUBSTANTIVE)], category="General"))
+        with patch("cogs.coach.cs.coach", new=AsyncMock()) as c:
+            await cog.shull_review.callback(cog, i)
+        c.assert_not_awaited()
+        assert "trade channel" in i.response.send_message.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_refused_when_corpus_broken(self):
+        with patch("cogs.coach.cs.load_corpus", side_effect=cs.CoachError("bad corpus")):
+            broken = Coach(MagicMock())
+        i = review_interaction(review_channel([msg(SUBSTANTIVE)]))
+        await broken.review_channel(i)
+        assert "bad corpus" in i.response.send_message.call_args[0][0]

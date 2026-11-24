@@ -844,3 +844,65 @@ class TestTradesShullIntegration:
     async def test_psych_context_tolerates_corrupt_files(self, trades_cog, tmp_path):
         (tmp_path / "psych.json").write_text("{broken")
         assert await trades_cog._get_psych_context(tmp_path) == ""
+
+
+# ──────────────────────────────────────────────
+# 🧠 Shull Review button on new trade channels
+# ──────────────────────────────────────────────
+
+from cogs.trades import ReflectionView
+
+
+def _shull_button(view):
+    for child in view.children:
+        if getattr(child, "custom_id", None) == "shull_review_btn":
+            return child
+    raise AssertionError("Shull Review button not found")
+
+
+class TestShullReviewButton:
+
+    @pytest.fixture
+    def trades_cog(self):
+        return Trades(MagicMock())
+
+    def test_welcome_view_carries_both_persistent_buttons(self):
+        view = ReflectionView()
+        ids = {c.custom_id for c in view.children}
+        assert {"trade_reflection_btn", "shull_review_btn"} <= ids
+        assert view.timeout is None  # survives restarts once registered
+
+    @pytest.mark.asyncio
+    async def test_new_channel_welcome_offers_the_review(self, trades_cog):
+        channel = AsyncMock(spec=discord.TextChannel)
+        channel.name = "trade_90_gc"
+        channel.category = MagicMock()
+        channel.category.name = "Fractal_Trades"
+
+        await trades_cog.on_guild_channel_create(channel)
+
+        kwargs = channel.send.call_args_list[-1].kwargs
+        assert any(f.name.startswith("🧠") for f in kwargs["embed"].fields)
+        _shull_button(kwargs["view"])
+
+    @pytest.mark.asyncio
+    async def test_button_delegates_to_the_coach(self):
+        coach = MagicMock()
+        coach.review_channel = AsyncMock()
+        interaction = MagicMock()
+        interaction.client.get_cog.return_value = coach
+
+        await _shull_button(ReflectionView()).callback(interaction)
+
+        interaction.client.get_cog.assert_called_with("Coach")
+        coach.review_channel.assert_awaited_once_with(interaction)
+
+    @pytest.mark.asyncio
+    async def test_button_reports_missing_coach(self):
+        interaction = MagicMock()
+        interaction.client.get_cog.return_value = None
+        interaction.response = AsyncMock()
+
+        await _shull_button(ReflectionView()).callback(interaction)
+
+        assert "isn't loaded" in interaction.response.send_message.call_args[0][0]

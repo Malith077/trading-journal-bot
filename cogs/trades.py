@@ -131,6 +131,15 @@ class ReflectionView(ui.View):
         modal = ReflectionModal(TRADES_DIR, channel_name)
         await interaction.response.send_modal(modal)
 
+    @ui.button(label="🧠 Shull Review", style=discord.ButtonStyle.secondary, custom_id="shull_review_btn")
+    async def shull_review(self, interaction: discord.Interaction, button: ui.Button):
+        """Run when you're done writing: a Shull reading of the whole channel."""
+        coach = interaction.client.get_cog("Coach")
+        if coach is None:
+            await interaction.response.send_message("❌ Coaching isn't loaded.", ephemeral=True)
+            return
+        await coach.review_channel(interaction)
+
 
 def _load_checklist_items() -> list[str]:
     """Load checklist items from the JSON config file."""
@@ -344,6 +353,11 @@ class Trades(commands.Cog):
         embed.add_field(name="🧠 Before you click", value=(
             "`/state` — mark-to-market your emotional read *before* the entry.\n"
             "`/outcome` — tag the result afterwards so the two can be correlated."
+        ), inline=False)
+        embed.add_field(name="🧠 When you're done writing", value=(
+            "Press **Shull Review** for a reading of everything in this channel — your "
+            "notes and your reflections — against Denise Shull's framework. "
+            "Run it again any time you add more."
         ), inline=False)
 
         view = ReflectionView()
