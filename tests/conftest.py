@@ -19,3 +19,15 @@ def _unlocked_guild_by_default(monkeypatch):
     Tests that care about the lock patch DEV_GUILD_ID explicitly.
     """
     monkeypatch.setattr("services.guild_guard.DEV_GUILD_ID", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_checklist(monkeypatch, tmp_path):
+    """
+    Keep a developer's own #trade_checklist edits out of the suite.
+
+    The live checklist file overrides trade_checklist.json when present, so a
+    real one on disk would change what every checklist test sees.
+    """
+    monkeypatch.setattr("cogs.trades.LIVE_CHECKLIST_PATH",
+                        tmp_path / "no_live_checklist.json", raising=False)

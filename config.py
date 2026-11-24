@@ -106,7 +106,24 @@ COACHING_DIR = BASE_DIR / "coaching"
 COACH_PRINCIPLES_PATH = COACHING_DIR / "shull_principles.json"
 COACH_LOG_PATH = BASE_DIR / "coach_log.jsonl"
 COACH_SETTINGS_PATH = BASE_DIR / "coach_settings.json"
-COACH_AUTO_DEFAULT = True
+# Off: readings on every journal message were noise mid-entry. Reviews run
+# when you press 🧠 Shull Review; /coach_auto turns per-message coaching on.
+COACH_AUTO_DEFAULT = False
+# --- Coach chat (#coach channel) ---
+# A running conversation with a coach that can look up your own trades.
+COACH_CHAT_CHANNEL_NAME = os.getenv("COACH_CHAT_CHANNEL_NAME", "coach")
+COACH_CHAT_DIR = BASE_DIR / "coach_chat"
+# Who the coach answers. Unset = anyone in the channel; set it to your Discord
+# user id if other people can post there, since the memory is about one trader.
+COACH_CHAT_USER_ID = _optional_int("COACH_CHAT_USER_ID")
+# Coaching quality is the whole point here, so it thinks before replying.
+DEEPSEEK_CHAT_EFFORT = os.getenv("DEEPSEEK_CHAT_EFFORT", "high")
+# Your local clock, and the exchange clock the trades actually happen on.
+LOCAL_TZ = "Australia/Melbourne"
+MARKET_TZ = "America/New_York"
+# Off-peak USD per 1M tokens for the flash model; peak is double.
+# Source: https://api-docs.deepseek.com/quick_start/pricing
+DEEPSEEK_PRICE_PER_M = {"cache_hit": 0.003, "cache_miss": 0.15, "output": 0.60}
 # --- Webhook Config ---
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "")

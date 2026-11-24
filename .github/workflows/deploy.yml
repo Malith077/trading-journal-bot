@@ -41,6 +41,7 @@ jobs:
             --exclude 'chroma_db/' \
             --exclude 'backups/' \
             --exclude 'rebuild_state.json' \
+            --exclude 'trade_checklist_live.json' \
             --exclude 'master_insights.json' \
             --exclude 'last_analyzed.txt' \
             --exclude 'missed_insights.json' \
@@ -48,6 +49,7 @@ jobs:
             --exclude 'psych_log.jsonl' \
             --exclude 'coach_log.jsonl' \
             --exclude 'coach_settings.json' \
+            --exclude 'coach_chat/' \
             --exclude 'failed_trades.json' \
             --exclude 'failed_missed.json' \
             ./ /home/malith/bot/

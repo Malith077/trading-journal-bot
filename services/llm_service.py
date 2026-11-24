@@ -394,6 +394,89 @@ class LLMService:
             raise LLMError("Ollama returned empty content.")
         return text
 
+    async def chat(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        tool_choice: str | None = None,
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
+        retries: int = 2,
+        retry_delay: float = 3.0,
+        timeout: int | None = None,
+    ) -> dict:
+        """
+        One multi-turn chat request, returning the assistant message as a dict:
+        {"role", "content", "reasoning_content", "tool_calls", "usage"}.
+
+        Unlike complete(), the caller owns the message list. With tools in
+        thinking mode, DeepSeek requires every earlier assistant message's
+        `reasoning_content` to be sent back unchanged, so callers must store
+        the returned message as-is and replay it.
+
+        DeepSeek only: Ollama's generate API has no tool calling.
+        """
+        if self._provider != "deepseek":
+            raise LLMError("Chat with tools needs LLM_PROVIDER=deepseek.")
+        ok, reason = self.is_configured()
+        if not ok:
+            raise LLMError(reason)
+
+        payload = {"model": DEEPSEEK_MODEL, "messages": messages, "stream": False}
+        if tools:
+            payload["tools"] = tools
+            if tool_choice:
+                payload["tool_choice"] = tool_choice
+        thinking = thinking_payload(reasoning_effort)
+        if thinking:
+            payload["thinking"] = thinking
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        url = f"{DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                session = await self._get_session()
+                data = await self._post_deepseek(session, url, headers, payload,
+                                                 timeout or LLM_TIMEOUT)
+                try:
+                    message = data["choices"][0]["message"]
+                except (KeyError, IndexError, TypeError):
+                    raise LLMError(f"Unexpected DeepSeek response shape: {str(data)[:300]}")
+
+                result = {
+                    "role": "assistant",
+                    "content": message.get("content") or "",
+                    "reasoning_content": message.get("reasoning_content"),
+                    "tool_calls": message.get("tool_calls") or [],
+                    "usage": data.get("usage") or {},
+                }
+                if not result["content"].strip() and not result["tool_calls"]:
+                    raise LLMError("DeepSeek returned empty content.")
+                return result
+            except asyncio.TimeoutError:
+                last_error = "Timeout"
+                print(f"[LLM] chat attempt {attempt}/{retries} timed out.")
+            except LLMError as e:
+                last_error = str(e)
+                print(f"[LLM] chat attempt {attempt}/{retries} failed — {e}")
+                if getattr(e, "permanent", False):
+                    break
+            except Exception as e:
+                last_error = str(e)
+                print(f"[LLM] chat attempt {attempt}/{retries} error: {e}")
+            if attempt < retries:
+                await asyncio.sleep(retry_delay)
+
+        raise LLMError(f"All {retries} attempt(s) failed. Last error: {last_error}")
+
     async def complete_json(self, prompt: str, fallback: dict, **kwargs) -> dict:
         """
         Convenience wrapper: run a JSON-mode completion and parse it, returning

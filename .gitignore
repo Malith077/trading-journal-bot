@@ -20,3 +20,5 @@ coach_settings.json
 backups/
 *.tmp
 rebuild_state.json
+trade_checklist_live.json
+coach_chat/

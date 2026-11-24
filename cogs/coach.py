@@ -21,7 +21,10 @@ from discord import app_commands
 from discord.ext import commands
 from discord import ui
 
-from config import COACH_LOG_PATH, COACH_AUTO_DEFAULT, COACH_SETTINGS_PATH, TRADES_DIR
+import datetime
+
+from config import (COACH_LOG_PATH, COACH_AUTO_DEFAULT, COACH_SETTINGS_PATH,
+                    TRADES_DIR, MISSED_DIR)
 from services import coach_service as cs
 from services.guild_guard import is_allowed_guild
 from services.coach_service import CoachError
@@ -110,8 +113,8 @@ async def gather_trade_entry(channel, trades_dir=None) -> tuple[str, bool]:
         if text:
             notes.append(text)
 
-    reflections = await _read_json(
-        Path(trades_dir or TRADES_DIR) / channel.name / "reflections.json", {})
+    folder = Path(trades_dir) / channel.name if trades_dir else journal_dir(channel.name)
+    reflections = await _read_json(folder / "reflections.json", {})
     reflection_lines = [
         f"- {label}: {reflections[key].strip()}"
         for key, label in REFLECTION_LABELS
@@ -132,6 +135,15 @@ async def gather_trade_entry(channel, trades_dir=None) -> tuple[str, bool]:
     own_words = notes_text + " ".join(reflections.get(k) or "" for k, _ in REFLECTION_LABELS
                                       if isinstance(reflections.get(k), str))
     return "\n\n".join(sections), cs.is_coachable(own_words)
+
+
+REVIEW_FILE = "shull_review.json"
+
+
+def journal_dir(channel_name: str) -> Path:
+    """Where a channel's journal files live — missed trades have their own tree."""
+    base = MISSED_DIR if channel_name.startswith("missed_") else TRADES_DIR
+    return base / channel_name
 
 
 def build_feedback_embed(feedback: dict, corpus: dict) -> discord.Embed:
@@ -338,29 +350,83 @@ class Coach(commands.Cog):
 
         self._reviewing.add(channel.id)
         try:
-            await interaction.response.defer(thinking=True)
+            # Ephemeral: the only public message is the reading itself.
+            await interaction.response.defer(ephemeral=True, thinking=True)
             entry, coachable = await gather_trade_entry(channel)
             if not coachable:
                 await interaction.followup.send(
                     "📭 Not enough written here to review yet (under "
                     f"{cs.MIN_ENTRY_CHARS} characters of your own words). Add your "
-                    "thoughts — what you saw, what you felt — then press the button again."
+                    "thoughts — what you saw, what you felt — then press the button again.",
+                    ephemeral=True,
                 )
                 return
 
             # Imported here: the trades cog is the owner of per-trade state files.
             from cogs.trades import Trades
-            context = await Trades._get_psych_context(TRADES_DIR / channel.name)
+            context = await Trades._get_psych_context(journal_dir(channel.name))
             try:
                 feedback = await cs.coach(entry, context=context, corpus=self._corpus)
             except CoachError as e:
-                await interaction.followup.send(f"❌ Shull review failed: {e}")
+                await interaction.followup.send(f"❌ Shull review failed: {e}", ephemeral=True)
                 return
+
+            message, updated = await self._publish_review(channel, entry, feedback)
         finally:
             self._reviewing.discard(channel.id)
 
-        await self._send_feedback(interaction.followup, entry, feedback,
-                                  channel_name=channel.name)
+        await interaction.followup.send(
+            f"🔄 Updated the reading: {message.jump_url}" if updated
+            else "✅ Reading posted below.",
+            ephemeral=True,
+        )
+
+    async def _publish_review(self, channel, entry: str, feedback: dict):
+        """
+        Post the reading, or replace the previous one in place on a re-run.
+
+        It goes out as a plain channel message, not an interaction follow-up:
+        follow-ups can only be edited for 15 minutes, and a re-run may come
+        days later. Returns (message, updated).
+        """
+        folder = journal_dir(channel.name)
+        saved = await _read_json(folder / REVIEW_FILE, {})
+        record = {
+            "channel": channel.name,
+            "entry": entry[:2000],
+            "cited": [o.get("principle_id") for o in feedback.get("observations", [])],
+            "warnings": feedback.get("warnings", []),
+            "forbidden_hits": feedback.get("forbidden_hits", []),
+            "corpus_version": self._corpus.get("version"),
+        }
+        now = datetime.datetime.now(datetime.timezone.utc)
+        runs = int(saved.get("runs") or 0) + 1
+        embed = build_feedback_embed(feedback, self._corpus)
+        embed.timestamp = now
+        if runs > 1:
+            embed.set_footer(text=f"{embed.footer.text} · review #{runs}")
+        view = GradeView(self, record)
+
+        message, updated = None, False
+        if saved.get("message_id"):
+            try:
+                message = await channel.fetch_message(int(saved["message_id"]))
+                await message.edit(embed=embed, view=view)
+                updated = True
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
+                message = None  # deleted or unreachable: post a fresh one
+        if message is None:
+            message = await channel.send(embed=embed, view=view)
+
+        await _write_json(folder / REVIEW_FILE, {
+            "message_id": str(message.id),
+            "runs": runs,
+            "updated_at": now.isoformat(),
+            "feedback": {k: feedback.get(k) for k in
+                         ("reading", "observations", "probe", "not_enough_signal",
+                          "warnings", "forbidden_hits")},
+        })
+        return message, updated
 
     @app_commands.command(name="shull_review",
                           description="Shull review of everything you've written in this trade channel.")

@@ -397,6 +397,10 @@ def review_channel(messages, name="trade_7_gc", category="Fractal_Trades", chann
     ch.history = history_of(messages)
     ch.category = MagicMock()
     ch.category.name = category
+    posted = MagicMock(id=4242, jump_url="https://discord.com/channels/1/7/4242")
+    posted.edit = AsyncMock()
+    ch.send = AsyncMock(return_value=posted)
+    ch.fetch_message = AsyncMock(return_value=posted)
     return ch
 
 
@@ -459,18 +463,64 @@ class TestChannelReview:
 
     @pytest.mark.asyncio
     async def test_reviews_whole_channel_and_posts_gradeable_reading(self, cog, tmp_path):
-        i = review_interaction(review_channel([msg(SUBSTANTIVE), msg("And it still stung.")]))
+        ch = review_channel([msg(SUBSTANTIVE), msg("And it still stung.")])
+        i = review_interaction(ch)
         with patch("cogs.coach.TRADES_DIR", tmp_path), \
              patch("cogs.coach.cs.coach", new=AsyncMock(return_value=FEEDBACK)) as c:
             await cog.review_channel(i)
 
         entry = c.call_args[0][0]
         assert SUBSTANTIVE in entry and "And it still stung." in entry
-        i.response.defer.assert_awaited_once()
-        kwargs = i.followup.send.call_args.kwargs
+        assert i.response.defer.call_args.kwargs["ephemeral"] is True
+        # The reading is an ordinary channel message, so it can be edited later.
+        kwargs = ch.send.call_args.kwargs
         assert kwargs["embed"].title == "🧠 Shull Reading"
         assert isinstance(kwargs["view"], GradeView)
         assert kwargs["view"].record["channel"] == "trade_7_gc"
+        assert i.followup.send.call_args.kwargs["ephemeral"] is True
+
+        saved = json.loads((tmp_path / "trade_7_gc" / "shull_review.json").read_text())
+        assert saved["message_id"] == "4242" and saved["runs"] == 1
+        assert saved["feedback"]["reading"] == FEEDBACK["reading"]
+
+    @pytest.mark.asyncio
+    async def test_rerun_replaces_the_previous_reading(self, cog, tmp_path):
+        ch = review_channel([msg(SUBSTANTIVE)])
+        with patch("cogs.coach.TRADES_DIR", tmp_path), \
+             patch("cogs.coach.cs.coach", new=AsyncMock(return_value=FEEDBACK)):
+            await cog.review_channel(review_interaction(ch))
+            second = review_interaction(ch)
+            await cog.review_channel(second)
+
+        assert ch.send.await_count == 1                  # posted once
+        ch.fetch_message.assert_awaited_with(4242)
+        edited = ch.fetch_message.return_value.edit.call_args.kwargs
+        assert "review #2" in edited["embed"].footer.text
+        assert "Updated" in second.followup.send.call_args[0][0]
+        saved = json.loads((tmp_path / "trade_7_gc" / "shull_review.json").read_text())
+        assert saved["runs"] == 2
+
+    @pytest.mark.asyncio
+    async def test_deleted_reading_is_posted_again(self, cog, tmp_path):
+        folder = tmp_path / "trade_7_gc"
+        folder.mkdir()
+        (folder / "shull_review.json").write_text(json.dumps({"message_id": "1", "runs": 1}))
+        ch = review_channel([msg(SUBSTANTIVE)])
+        ch.fetch_message.side_effect = discord.NotFound(MagicMock(status=404), "gone")
+        with patch("cogs.coach.TRADES_DIR", tmp_path), \
+             patch("cogs.coach.cs.coach", new=AsyncMock(return_value=FEEDBACK)):
+            await cog.review_channel(review_interaction(ch))
+        ch.send.assert_awaited_once()
+        assert json.loads((folder / "shull_review.json").read_text())["message_id"] == "4242"
+
+    @pytest.mark.asyncio
+    async def test_missed_trade_reviews_live_in_the_missed_tree(self, cog, tmp_path):
+        ch = review_channel([msg(SUBSTANTIVE)], name="missed_3_es", category="Missed_Trades")
+        with patch("cogs.coach.TRADES_DIR", tmp_path / "trades"), \
+             patch("cogs.coach.MISSED_DIR", tmp_path / "missed"), \
+             patch("cogs.coach.cs.coach", new=AsyncMock(return_value=FEEDBACK)):
+            await cog.review_channel(review_interaction(ch))
+        assert (tmp_path / "missed" / "missed_3_es" / "shull_review.json").exists()
 
     @pytest.mark.asyncio
     async def test_passes_logged_psych_state_as_context(self, cog, tmp_path):
@@ -491,6 +541,11 @@ class TestChannelReview:
             await cog.review_channel(i)
         c.assert_not_awaited()
         assert "Not enough written" in i.followup.send.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_auto_coaching_is_off_by_default(self, cog, tmp_path):
+        with patch("cogs.coach.COACH_SETTINGS_PATH", tmp_path / "none.json"):
+            assert await cog._auto_enabled() is False
 
     @pytest.mark.asyncio
     async def test_failure_is_reported_and_lock_released(self, cog, tmp_path):

@@ -13,6 +13,7 @@ from services.json_utils import extract_json as _extract_json, write_json_atomic
 from services.llm_service import llm_service, LLMError, encode_image_file
 from services import psych_service as ps
 from services.guild_guard import is_allowed_guild
+from services.checklist_service import LIVE_CHECKLIST_PATH, MAX_ITEMS as MAX_CHECKLIST_ITEMS
 from config import (
     BACKUPS_DIR,
     DEEPSEEK_JOURNAL_EFFORT,
@@ -142,15 +143,80 @@ class ReflectionView(ui.View):
 
 
 def _load_checklist_items() -> list[str]:
-    """Load checklist items from the JSON config file."""
-    try:
-        with open(CHECKLIST_PATH, "r", encoding="utf-8") as f:
-            items = json.load(f)
+    """
+    The checklist new trade channels get.
+
+    The list maintained in #trade_checklist (see cogs/checklist.py) wins; the
+    repo's trade_checklist.json is the default until that channel is used.
+    """
+    for path in (LIVE_CHECKLIST_PATH, CHECKLIST_PATH):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                items = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
         if isinstance(items, list) and items:
-            return [str(item) for item in items]
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+            return [str(item) for item in items][:MAX_CHECKLIST_ITEMS]
     return []
+
+
+_CHECK_ICONS = ("✅", "⬜")
+
+
+def _items_from_embed(message) -> tuple[list[str], list[bool]]:
+    """
+    Recover a checklist's items and ticks from the message it is shown in.
+
+    Channels created before checklists were snapshotted saved only their
+    ticks, so the message itself is the record of which items they had.
+    """
+    try:
+        field = next(f for f in message.embeds[0].fields if f.name == "Checklist")
+    except (AttributeError, IndexError, StopIteration, TypeError):
+        return [], []
+    items, states = [], []
+    for line in str(field.value).splitlines():
+        line = line.strip()
+        icon = next((i for i in _CHECK_ICONS if line.startswith(i)), None)
+        if icon is None:
+            continue
+        items.append(line[len(icon):].strip())
+        states.append(icon == "✅")
+    return items, states
+
+
+async def _read_checklist_state(state_path: Path, message=None) -> tuple[list[str], list[bool]]:
+    """
+    A trade channel's own checklist: the items it was created with, and ticks.
+
+    Saved as {"items": [...], "states": [...]}. The older format was a bare
+    list of ticks; for those the items come from the checklist message.
+    """
+    saved = None
+    try:
+        async with aiofiles.open(state_path, "r", encoding="utf-8") as f:
+            saved = json.loads(await f.read())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+    if isinstance(saved, dict) and isinstance(saved.get("items"), list) and saved["items"]:
+        items = [str(i) for i in saved["items"]]
+        states = [bool(x) for x in saved.get("states") or []]
+    else:
+        items, states = _items_from_embed(message)
+        if isinstance(saved, list):
+            states = [bool(x) for x in saved]
+        if not items:
+            items = _load_checklist_items()
+
+    states = (states + [False] * len(items))[:len(items)]
+    return items, states
+
+
+async def _write_checklist_state(state_path: Path, items: list[str], states: list[bool]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(state_path, "w", encoding="utf-8") as f:
+        await f.write(json.dumps({"items": items, "states": states}, ensure_ascii=False))
 
 
 def _build_checklist_embed(items: list[str], states: list[bool]) -> discord.Embed:
@@ -190,63 +256,55 @@ def _build_checklist_embed(items: list[str], states: list[bool]) -> discord.Embe
 
 
 class ChecklistView(ui.View):
-    """Persistent view with toggle buttons for each checklist item."""
+    """
+    Toggle buttons for a checklist.
 
-    def __init__(self, items: list[str] | None = None):
+    Each trade channel renders its own snapshot of the checklist. The single
+    view registered at startup (`persistent()`) only routes clicks: it carries
+    a button for every possible index, so a checklist posted under an older,
+    longer list still responds after the list is edited.
+    """
+
+    def __init__(self, items: list[str] | None = None, states: list[bool] | None = None,
+                 *, slots: int | None = None):
         super().__init__(timeout=None)  # Never expires
         if items is None:
             items = _load_checklist_items()
         self.items = items
-        # Dynamically add a button for each item
-        for i, item in enumerate(items):
+        states = states or []
+        for i in range(len(items) if slots is None else slots):
+            label = f"{i+1}. {items[i][:70]}" if i < len(items) else f"{i+1}."  # labels max 80
             button = ui.Button(
-                label=f"{i+1}. {item[:70]}",  # Discord button label max ~80 chars
-                style=discord.ButtonStyle.secondary,
+                label=label,
+                style=(discord.ButtonStyle.success if i < len(states) and states[i]
+                       else discord.ButtonStyle.secondary),
                 custom_id=f"checklist_{i}",
             )
             button.callback = self._make_callback(i)
             self.add_item(button)
 
+    @classmethod
+    def persistent(cls) -> "ChecklistView":
+        """The click router registered once at startup."""
+        return cls(items=[], slots=MAX_CHECKLIST_ITEMS)
+
     def _make_callback(self, index: int):
         """Create a callback closure for a specific checklist item index."""
         async def callback(interaction: discord.Interaction):
-            channel_name = interaction.channel.name
-            channel_dir = TRADES_DIR / channel_name
-            channel_dir.mkdir(parents=True, exist_ok=True)
-            state_path = channel_dir / "checklist_state.json"
+            state_path = TRADES_DIR / interaction.channel.name / "checklist_state.json"
+            items, states = await _read_checklist_state(state_path, interaction.message)
 
-            # Load current state
-            try:
-                async with aiofiles.open(state_path, "r", encoding="utf-8") as f:
-                    content = await f.read()
-                    states = json.loads(content)
-            except (FileNotFoundError, json.JSONDecodeError):
-                states = [False] * len(self.items)
+            if index >= len(items):
+                await interaction.response.send_message(
+                    "That item isn't on this trade's checklist.", ephemeral=True)
+                return
 
-            # Ensure states list matches items length
-            while len(states) < len(self.items):
-                states.append(False)
-
-            # Toggle the clicked item
             states[index] = not states[index]
-
-            # Save state
-            async with aiofiles.open(state_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(states))
-
-            # Update the embed in-place
-            embed = _build_checklist_embed(self.items, states)
-
-            # Update button styles to reflect state
-            for i, child in enumerate(self.children):
-                if isinstance(child, ui.Button) and child.custom_id and child.custom_id.startswith("checklist_"):
-                    btn_idx = int(child.custom_id.split("_")[1])
-                    if btn_idx < len(states) and states[btn_idx]:
-                        child.style = discord.ButtonStyle.success
-                    else:
-                        child.style = discord.ButtonStyle.secondary
-
-            await interaction.response.edit_message(embed=embed, view=self)
+            await _write_checklist_state(state_path, items, states)
+            await interaction.response.edit_message(
+                embed=_build_checklist_embed(items, states),
+                view=ChecklistView(items, states),
+            )
 
         return callback
 
@@ -327,12 +385,10 @@ class Trades(commands.Cog):
             checklist_view = ChecklistView(items)
             await channel.send(embed=checklist_embed, view=checklist_view)
 
-            # Save initial state to disk
-            channel_dir = TRADES_DIR / channel.name
-            channel_dir.mkdir(parents=True, exist_ok=True)
-            state_path = channel_dir / "checklist_state.json"
-            async with aiofiles.open(state_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(states))
+            # Snapshot the list with the ticks, so later edits to the checklist
+            # in #trade_checklist don't change this trade's.
+            await _write_checklist_state(TRADES_DIR / channel.name / "checklist_state.json",
+                                         items, states)
 
         # --- Reflection Prompt ---
         embed = discord.Embed(
@@ -357,7 +413,7 @@ class Trades(commands.Cog):
         embed.add_field(name="🧠 When you're done writing", value=(
             "Press **Shull Review** for a reading of everything in this channel — your "
             "notes and your reflections — against Denise Shull's framework. "
-            "Run it again any time you add more."
+            "Edited or added something? Press it again and the reading is updated in place."
         ), inline=False)
 
         view = ReflectionView()
@@ -900,7 +956,5 @@ Respond STRICTLY in valid JSON format with no extra text:
 async def setup(bot):
     await bot.add_cog(Trades(bot))
     bot.add_view(ReflectionView())
-    # Register persistent checklist view (items loaded from config)
-    items = _load_checklist_items()
-    if items:
-        bot.add_view(ChecklistView(items))
+    # Routes checklist clicks in every trade channel, whatever list it has.
+    bot.add_view(ChecklistView.persistent())
